@@ -58,6 +58,20 @@ namespace WinShareFixer
         // [修正] 改为实例字段，避免多窗体实例间共享导致资源冲突或已释放异常
         private Font _fontBold10;
         private Font _fontBold95;
+        private readonly object _operationLock = new object();
+        private CancellationTokenSource _currentOperationCts;
+        private System.Threading.Timer _currentTimeoutTimer;
+        private volatile bool _isClosing;
+
+        private sealed class ProcessExecutionResult
+        {
+            public bool Started;
+            public bool TimedOut;
+            public bool Cancelled;
+            public int ExitCode = -1;
+            public string Output = string.Empty;
+            public string Error = string.Empty;
+        }
 
         public MainForm()
         {
@@ -96,6 +110,8 @@ namespace WinShareFixer
         {
             if (disposing)
             {
+                CancelCurrentOperation();
+
                 if (_fontBold10 != null)
                 {
                     _fontBold10.Dispose();
@@ -108,6 +124,18 @@ namespace WinShareFixer
                 }
             }
             base.Dispose(disposing);
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            CancelCurrentOperation();
+            base.OnFormClosing(e);
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            _isClosing = true;
+            base.OnFormClosed(e);
         }
 
         private void InitializeComponent()
@@ -238,13 +266,42 @@ namespace WinShareFixer
         #endregion
 
         #region 日志输出与精准高亮
-        private void Log(string text)
+        private void TryBeginInvoke(Action action)
         {
+            if (_isClosing || this.IsDisposed || !this.IsHandleCreated) return;
+
+            try
+            {
+                this.BeginInvoke(action);
+            }
+            catch (InvalidOperationException) { }
+            catch (ObjectDisposedException) { }
+        }
+
+        private void ResetLogView()
+        {
+            if (_isClosing || this.txtLog == null || this.txtLog.IsDisposed) return;
+
             if (this.InvokeRequired)
             {
-                this.BeginInvoke(new Action<string>(Log), text);
+                TryBeginInvoke(new Action(ResetLogView));
                 return;
             }
+
+            this.txtLog.Clear();
+        }
+
+        private void Log(string text)
+        {
+            if (_isClosing || this.txtLog == null || this.txtLog.IsDisposed) return;
+
+            if (this.InvokeRequired)
+            {
+                TryBeginInvoke(delegate { Log(text); });
+                return;
+            }
+
+            if (_isClosing || this.txtLog == null || this.txtLog.IsDisposed) return;
 
             int startLen = this.txtLog.TextLength;
             this.txtLog.AppendText(text + "\n");
@@ -306,9 +363,11 @@ namespace WinShareFixer
 
         private void SetButtonsEnabled(bool enabled)
         {
+            if (_isClosing) return;
+
             if (this.InvokeRequired)
             {
-                this.BeginInvoke(new Action<bool>(SetButtonsEnabled), enabled);
+                TryBeginInvoke(delegate { SetButtonsEnabled(enabled); });
                 return;
             }
             this.btnGuestFix.Enabled = enabled;
@@ -319,190 +378,225 @@ namespace WinShareFixer
 
         private void SetStatusText(string text)
         {
+            if (_isClosing || this.lblStatus == null || this.lblStatus.IsDisposed) return;
+
             if (this.InvokeRequired)
             {
-                this.BeginInvoke(new Action<string>(SetStatusText), text);
+                TryBeginInvoke(delegate { SetStatusText(text); });
                 return;
             }
             this.lblStatus.Text = text;
+        }
+
+        private void CancelCurrentOperation()
+        {
+            CancellationTokenSource cts = null;
+            System.Threading.Timer timer = null;
+
+            lock (_operationLock)
+            {
+                cts = _currentOperationCts;
+                timer = _currentTimeoutTimer;
+                _currentOperationCts = null;
+                _currentTimeoutTimer = null;
+            }
+
+            if (timer != null)
+            {
+                try { timer.Dispose(); } catch { }
+            }
+
+            if (cts != null)
+            {
+                try { cts.Cancel(); } catch { }
+            }
+        }
+
+        private void FinishOperation(CancellationTokenSource cts)
+        {
+            System.Threading.Timer timerToDispose = null;
+
+            lock (_operationLock)
+            {
+                if (ReferenceEquals(_currentOperationCts, cts))
+                {
+                    timerToDispose = _currentTimeoutTimer;
+                    _currentTimeoutTimer = null;
+                    _currentOperationCts = null;
+                }
+            }
+
+            if (timerToDispose != null)
+            {
+                try { timerToDispose.Dispose(); } catch { }
+            }
+
+            if (cts != null)
+            {
+                try { cts.Dispose(); } catch { }
+            }
+
+            if (!_isClosing)
+            {
+                SetButtonsEnabled(true);
+            }
+        }
+
+        private string FormatTimeoutText(int timeoutMilliseconds)
+        {
+            if (timeoutMilliseconds % 60000 == 0)
+            {
+                return (timeoutMilliseconds / 60000).ToString() + " 分钟";
+            }
+
+            return (timeoutMilliseconds / 1000).ToString() + " 秒";
+        }
+
+        private void StartBackgroundOperation(
+            string operationName,
+            string runningStatus,
+            string successStatus,
+            string failureStatus,
+            int timeoutMilliseconds,
+            Action<CancellationToken> action)
+        {
+            SetButtonsEnabled(false);
+            SetStatusText(runningStatus);
+            ResetLogView();
+            LogSystemInformation();
+
+            CancellationTokenSource cts = new CancellationTokenSource();
+            int timeoutTriggered = 0;
+
+            lock (_operationLock)
+            {
+                _currentOperationCts = cts;
+                _currentTimeoutTimer = new System.Threading.Timer(delegate(object state)
+                {
+                    if (Interlocked.Exchange(ref timeoutTriggered, 1) == 0)
+                    {
+                        Log("\n        [警告] 操作超时（超过 " + FormatTimeoutText(timeoutMilliseconds) + "），正在取消后台任务...");
+                        SetStatusText("状态：正在取消超时任务，请稍候...");
+                        try { cts.Cancel(); } catch { }
+                    }
+                }, null, timeoutMilliseconds, System.Threading.Timeout.Infinite);
+            }
+
+            ThreadPool.QueueUserWorkItem(delegate(object state)
+            {
+                try
+                {
+                    action(cts.Token);
+                    cts.Token.ThrowIfCancellationRequested();
+                    SetStatusText(successStatus);
+                }
+                catch (OperationCanceledException)
+                {
+                    if (!_isClosing)
+                    {
+                        if (Interlocked.CompareExchange(ref timeoutTriggered, 0, 0) == 1)
+                            SetStatusText("状态：操作超时，后台任务已取消。");
+                        else
+                            SetStatusText("状态：操作已取消。");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log("\n        [错误] " + operationName + "过程异常: " + ex.Message);
+                    SetStatusText(failureStatus);
+                }
+                finally
+                {
+                    FinishOperation(cts);
+                }
+            });
         }
         #endregion
 
         #region 事件处理
         private void BtnGuestFix_Click(object sender, EventArgs e)
         {
-            SetButtonsEnabled(false);
-            this.lblStatus.Text = "状态：正在执行 Guest 免密共享修复...";
-            this.txtLog.Clear();
-            LogSystemInformation();
-
-            // 优化：添加超时保护
-            System.Threading.Timer timeoutTimer = null;
-            timeoutTimer = new System.Threading.Timer(delegate(object state)
-            {
-                Log("\n        [警告] 操作超时（超过 10 分钟），已强制停止。");
-                SetStatusText("状态：操作超时，请重试。");
-                SetButtonsEnabled(true);
-                if (timeoutTimer != null) timeoutTimer.Dispose();
-            }, null, 600000, System.Threading.Timeout.Infinite);
-
-            ThreadPool.QueueUserWorkItem(delegate(object state)
-            {
-                try
-                {
-                    RunGuestFixLogic();
-                    SetStatusText("状态：Guest 修复完成！建议重启电脑。");
-                }
-                catch (Exception ex)
-                {
-                    Log("\n        [错误] Guest 修复过程异常: " + ex.Message);
-                    SetStatusText("状态：Guest 修复失败，请查看日志。");
-                }
-                finally
-                {
-                    if (timeoutTimer != null) timeoutTimer.Dispose();
-                    SetButtonsEnabled(true);
-                }
-            });
+            StartBackgroundOperation(
+                "Guest 修复",
+                "状态：正在执行 Guest 免密共享修复...",
+                "状态：Guest 修复完成！建议重启电脑。",
+                "状态：Guest 修复失败，请查看日志。",
+                600000,
+                RunGuestFixLogic);
         }
 
         private void BtnSmbFix_Click(object sender, EventArgs e)
         {
-            SetButtonsEnabled(false);
-            this.lblStatus.Text = "状态：正在执行 SMB 核心共享修复与诊断...";
-            this.txtLog.Clear();
-            LogSystemInformation();
-
-            System.Threading.Timer timeoutTimer = null;
-            timeoutTimer = new System.Threading.Timer(delegate(object state)
-            {
-                Log("\n        [警告] 操作超时（超过 10 分钟），已强制停止。");
-                SetStatusText("状态：操作超时，请重试。");
-                SetButtonsEnabled(true);
-                if (timeoutTimer != null) timeoutTimer.Dispose();
-            }, null, 600000, System.Threading.Timeout.Infinite);
-
-            ThreadPool.QueueUserWorkItem(delegate(object state)
-            {
-                try
-                {
-                    RunSmbFixLogic();
-                    SetStatusText("状态：SMB 共享配置与诊断就绪！");
-                }
-                catch (Exception ex)
-                {
-                    Log("\n        [错误] SMB 修复过程异常: " + ex.Message);
-                    SetStatusText("状态：SMB 修复失败，请查看日志。");
-                }
-                finally
-                {
-                    if (timeoutTimer != null) timeoutTimer.Dispose();
-                    SetButtonsEnabled(true);
-                }
-            });
+            StartBackgroundOperation(
+                "SMB 修复",
+                "状态：正在执行 SMB 核心共享修复与诊断...",
+                "状态：SMB 共享配置与诊断就绪！",
+                "状态：SMB 修复失败，请查看日志。",
+                600000,
+                RunSmbFixLogic);
         }
 
         private void BtnPrinterFix_Click(object sender, EventArgs e)
         {
-            SetButtonsEnabled(false);
-            this.lblStatus.Text = "状态：正在深度修复打印服务与连接...";
-            this.txtLog.Clear();
-            LogSystemInformation();
-
-            System.Threading.Timer timeoutTimer = null;
-            timeoutTimer = new System.Threading.Timer(delegate(object state)
-            {
-                Log("\n        [警告] 操作超时（超过 10 分钟），已强制停止。");
-                SetStatusText("状态：操作超时，请重试。");
-                SetButtonsEnabled(true);
-                if (timeoutTimer != null) timeoutTimer.Dispose();
-            }, null, 600000, System.Threading.Timeout.Infinite);
-
-            ThreadPool.QueueUserWorkItem(delegate(object state)
-            {
-                try
-                {
-                    RunPrinterFixLogic();
-                    SetStatusText("状态：打印服务与策略修复完毕！建议重启电脑。");
-                }
-                catch (Exception ex)
-                {
-                    Log("\n        [错误] 打印机修复过程异常: " + ex.Message);
-                    SetStatusText("状态：打印机修复失败，请查看日志。");
-                }
-                finally
-                {
-                    if (timeoutTimer != null) timeoutTimer.Dispose();
-                    SetButtonsEnabled(true);
-                }
-            });
+            StartBackgroundOperation(
+                "打印机修复",
+                "状态：正在深度修复打印服务与连接...",
+                "状态：打印服务与策略修复完毕！建议重启电脑。",
+                "状态：打印机修复失败，请查看日志。",
+                600000,
+                RunPrinterFixLogic);
         }
 
         private void BtnPauseUpdate_Click(object sender, EventArgs e)
         {
-            SetButtonsEnabled(false);
-            this.lblStatus.Text = "状态：正在配置 Windows 自动更新暂停策略...";
-            this.txtLog.Clear();
-            LogSystemInformation();
-
-            System.Threading.Timer timeoutTimer = null;
-            timeoutTimer = new System.Threading.Timer(delegate(object state)
-            {
-                Log("\n        [警告] 操作超时（超过 5 分钟），已强制停止。");
-                SetStatusText("状态：操作超时，请重试。");
-                SetButtonsEnabled(true);
-                if (timeoutTimer != null) timeoutTimer.Dispose();
-            }, null, 300000, System.Threading.Timeout.Infinite);
-
-            ThreadPool.QueueUserWorkItem(delegate(object state)
-            {
-                try
-                {
-                    RunPauseUpdateLogic();
-                    SetStatusText("状态：Windows 自动更新策略配置完毕！");
-                }
-                catch (Exception ex)
-                {
-                    Log("\n        [错误] 暂停更新过程异常: " + ex.Message);
-                    SetStatusText("状态：Windows 更新策略配置失败，请查看日志。");
-                }
-                finally
-                {
-                    if (timeoutTimer != null) timeoutTimer.Dispose();
-                    SetButtonsEnabled(true);
-                }
-            });
+            StartBackgroundOperation(
+                "暂停更新",
+                "状态：正在配置 Windows 自动更新暂停策略...",
+                "状态：Windows 自动更新策略配置完毕！",
+                "状态：Windows 更新策略配置失败，请查看日志。",
+                300000,
+                RunPauseUpdateLogic);
         }
         #endregion
 
         #region 1. Guest 修复逻辑
-        private void RunGuestFixLogic()
+        private void RunGuestFixLogic(CancellationToken token)
         {
+            token.ThrowIfCancellationRequested();
             Log("==================================================");
             Log("        正在配置 Guest 免密共享与系统安全策略...");
             Log("==================================================\n");
 
-            RunQuietProcess("net", "user Guest /active:yes");
-            FixRegistryPoliciesApi();
-            Log("        [成功] 匿名共享注册表策略已通过 API 修复。");
+            int guestCode = RunQuietProcess("net", "user Guest /active:yes", token);
+            if (guestCode == 0)
+                Log("        [成功] Guest 账户启用命令执行完成。");
+            else
+                Log("        [警告] Guest 账户启用命令返回码: " + guestCode);
 
-            RemoveGuestFromDenyLogon();
+            bool registryFixed = FixRegistryPoliciesApi(token);
+            if (registryFixed)
+                Log("        [成功] 匿名共享注册表策略已通过 API 修复。");
+            else
+                Log("        [警告] 匿名共享注册表策略未完全写入成功，请查看前序日志。");
+
+            token.ThrowIfCancellationRequested();
+            RemoveGuestFromDenyLogon(token);
 
             int build = GetWindowsBuildNumber();
             if (build < 9200)
             {
-                StartServiceApi("Browser", "Computer Browser 服务");
+                StartServiceApi("Browser", "Computer Browser 服务", token);
             }
 
-            StartServiceApi("LanmanServer", "Server 服务");
-            StartServiceApi("LanmanWorkstation", "Workstation 服务");
-            StartServiceApi("fdPHost", "Function Discovery Provider Host 服务");
-            StartServiceApi("FDResPub", "Function Discovery Resource Publication 服务");
-            StartServiceApi("Dnscache", "DNS Client 服务");
-            StartServiceApi("lmhosts", "TCP/IP NetBIOS Helper 服务");
+            StartServiceApi("LanmanServer", "Server 服务", token);
+            StartServiceApi("LanmanWorkstation", "Workstation 服务", token);
+            StartServiceApi("fdPHost", "Function Discovery Provider Host 服务", token);
+            StartServiceApi("FDResPub", "Function Discovery Resource Publication 服务", token);
+            StartServiceApi("Dnscache", "DNS Client 服务", token);
+            StartServiceApi("lmhosts", "TCP/IP NetBIOS Helper 服务", token);
 
-            EnableFirewallRules();
-            RefreshNetworkCache();
+            EnableFirewallRules(token);
+            RefreshNetworkCache(token);
 
             Log("\n==================================================");
             Log("              [ OK ] Guest 免密共享修复完成！");
@@ -511,8 +605,9 @@ namespace WinShareFixer
         #endregion
 
         #region 2. SMB 修复逻辑
-        private void RunSmbFixLogic()
+        private void RunSmbFixLogic(CancellationToken token)
         {
+            token.ThrowIfCancellationRequested();
             Log("==================================================");
             Log("      正在配置并修复局域网 SMB 共享服务...");
             Log("==================================================\n");
@@ -527,9 +622,14 @@ namespace WinShareFixer
             else
             {
                 string checkCmd = "Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol | Select-Object -ExpandProperty State";
-                string checkResult = RunPowerShellCommand(checkCmd);
+                bool checkSucceeded;
+                string checkResult = RunPowerShellCommand(checkCmd, token, out checkSucceeded);
 
-                if (string.IsNullOrEmpty(checkResult) || checkResult.Contains("Unknown"))
+                if (!checkSucceeded)
+                {
+                    Log("        [警告] 无法可靠检测 SMB1Protocol 状态，已跳过自动启用以避免误判。");
+                }
+                else if (string.IsNullOrEmpty(checkResult) || checkResult.Contains("Unknown"))
                 {
                     Log("        [提示] 当前 Windows 系统已彻底移除 SMB1Protocol 功能项，自动跳过安装。");
                 }
@@ -540,45 +640,64 @@ namespace WinShareFixer
                 else
                 {
                     Log("        正在启用 SMB1Protocol...（CBS 事务执行中）");
-                    RunQuietProcessWithTimeout("powershell", "-NoProfile -ExecutionPolicy Bypass -Command \"Enable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart -ErrorAction SilentlyContinue\"", 20000);
+                    int enableCode = RunQuietProcessWithTimeout("powershell", "-NoProfile -ExecutionPolicy Bypass -Command \"Enable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart -ErrorAction SilentlyContinue\"", 20000, token);
 
-                    Log("        正在等待 CBS 写入并校验 SMB1 激活状态...");
-                    bool isEnabled = false;
-                    for (int i = 0; i < 15; i++)
+                    if (enableCode != 0 && enableCode != 3010)
                     {
-                        Thread.Sleep(2000);
-                        string status = RunPowerShellCommand(checkCmd).Trim();
-                        if (status.Equals("Enabled", StringComparison.OrdinalIgnoreCase))
-                        {
-                            isEnabled = true;
-                            break;
-                        }
+                        Log("        [警告] 启用 SMB1Protocol 命令返回码: " + enableCode);
                     }
-
-                    if (isEnabled)
-                        Log("        [成功] SMB1 协议已成功激活并确认生效。");
                     else
-                        Log("        [警告] SMB1 协议已提交开启请求，后台 CBS 尚在处理中或需要重启电脑生效。");
+                    {
+                        Log("        正在等待 CBS 写入并校验 SMB1 激活状态...");
+                        bool isEnabled = false;
+                        for (int i = 0; i < 15; i++)
+                        {
+                            token.ThrowIfCancellationRequested();
+                            Thread.Sleep(2000);
+
+                            bool recheckSucceeded;
+                            string status = RunPowerShellCommand(checkCmd, token, out recheckSucceeded).Trim();
+                            if (!recheckSucceeded)
+                            {
+                                Log("        [警告] SMB1 激活状态复检失败，可能需要重启后再确认。");
+                                break;
+                            }
+
+                            if (status.Equals("Enabled", StringComparison.OrdinalIgnoreCase))
+                            {
+                                isEnabled = true;
+                                break;
+                            }
+                        }
+
+                        if (isEnabled)
+                            Log("        [成功] SMB1 协议已成功激活并确认生效。");
+                        else
+                            Log("        [警告] SMB1 协议已提交开启请求，后台 CBS 尚在处理中或需要重启电脑生效。");
+                    }
                 }
             }
 
-            FixRegistryPoliciesApi();
-            Log("        [成功] HKLM 核心共享注册表项修改完成。");
+            bool registryFixed = FixRegistryPoliciesApi(token);
+            if (registryFixed)
+                Log("        [成功] HKLM 核心共享注册表项修改完成。");
+            else
+                Log("        [警告] HKLM 核心共享注册表项未完全写入成功。");
 
-            StartServiceApi("LanmanServer", "Server (LanmanServer)");
-            StartServiceApi("LanmanWorkstation", "Workstation (LanmanWorkstation)");
+            StartServiceApi("LanmanServer", "Server (LanmanServer)", token);
+            StartServiceApi("LanmanWorkstation", "Workstation (LanmanWorkstation)", token);
 
             Log("\n[2/3] 配置防火墙规则，放行文件与打印机共享通道...");
-            EnableFirewallRules();
+            EnableFirewallRules(token);
 
             Log("\n[3/3] 补全启动网络发现核心服务并刷新缓存...");
-            StartServiceApi("fdPHost", "fdPHost 服务");
-            StartServiceApi("FDResPub", "FDResPub 服务");
-            StartServiceApi("SSDPSRV", "SSDPSRV 服务");
-            StartServiceApi("upnphost", "upnphost 服务");
-            StartServiceApi("lmhosts", "lmhosts 服务");
+            StartServiceApi("fdPHost", "fdPHost 服务", token);
+            StartServiceApi("FDResPub", "FDResPub 服务", token);
+            StartServiceApi("SSDPSRV", "SSDPSRV 服务", token);
+            StartServiceApi("upnphost", "upnphost 服务", token);
+            StartServiceApi("lmhosts", "lmhosts 服务", token);
 
-            RefreshNetworkCache();
+            RefreshNetworkCache(token);
 
             Log("\n==================================================");
             Log("                    检测结果");
@@ -592,36 +711,43 @@ namespace WinShareFixer
         #endregion
 
         #region 3. 打印机修复逻辑
-        private void RunPrinterFixLogic()
+        private void RunPrinterFixLogic(CancellationToken token)
         {
+            token.ThrowIfCancellationRequested();
             Log("==================================================");
             Log("     正在全面修复局域网打印与 Print Spooler 服务...");
             Log("==================================================\n");
 
             Log("[1/6] 修复跨系统版本安全更新连接报错 (0x0000011b / 0x00000709 等)...");
-            FixPrinterRegistryApi();
-            Log("        [成功] 注册表打印 RPC 与免密驱动安装策略修复完成。");
+            bool printerRegistryFixed = FixPrinterRegistryApi(token);
+            if (printerRegistryFixed)
+                Log("        [成功] 注册表打印 RPC 与免密驱动安装策略修复完成。");
+            else
+                Log("        [警告] 打印 RPC 或驱动安装策略未完全写入成功。");
 
             Log("\n[2/6] 优化网络访问模式与网络共享策略...");
-            FixLsaPoliciesApi();
-            Log("        [成功] LSA 网络访问策略优化完成。");
+            bool lsaFixed = FixLsaPoliciesApi(token);
+            if (lsaFixed)
+                Log("        [成功] LSA 网络访问策略优化完成。");
+            else
+                Log("        [警告] LSA 网络访问策略未完全写入成功。");
 
             Log("\n[3/6] 正在检查并激活 Print Spooler 核心依赖服务 (RPC/DCOM/Workstation)...");
-            StartServiceApi("RpcSs", "RPC Core (RpcSs)");
-            StartServiceApi("DcomLaunch", "DCOM Process Launcher");
-            StartServiceApi("RpcEptMapper", "RPC Endpoint Mapper");
-            StartServiceApi("LanmanWorkstation", "Workstation 服务");
+            StartServiceApi("RpcSs", "RPC Core (RpcSs)", token);
+            StartServiceApi("DcomLaunch", "DCOM Process Launcher", token);
+            StartServiceApi("RpcEptMapper", "RPC Endpoint Mapper", token);
+            StartServiceApi("LanmanWorkstation", "Workstation 服务", token);
 
             Log("\n[4/6] 安全停止打印服务并清理积压打印任务缓存...");
-            StopSpoolerServiceApi();
-            CleanSpoolPrintersDirectoryApi();
+            StopSpoolerServiceApi(token);
+            CleanSpoolPrintersDirectoryApi(token);
 
             Log("\n[5/6] 重新启动 Print Spooler 与 PrintNotify / 网络解析服务...");
-            StartServiceApi("PrintNotify", "PrintNotify 打印通知服务");
-            StartServiceApi("lmhosts", "lmhosts 服务");
-            StartServiceApi("FDResPub", "FDResPub 服务");
-            StartServiceApi("Spooler", "Print Spooler 打印后台服务");
-            RefreshNetworkCache();
+            StartServiceApi("PrintNotify", "PrintNotify 打印通知服务", token);
+            StartServiceApi("lmhosts", "lmhosts 服务", token);
+            StartServiceApi("FDResPub", "FDResPub 服务", token);
+            StartServiceApi("Spooler", "Print Spooler 打印后台服务", token);
+            RefreshNetworkCache(token);
 
             Log("\n[6/6] 最终状态判定与诊断...");
             bool isSpoolerRunning = IsServiceRunning("Spooler");
@@ -649,8 +775,9 @@ namespace WinShareFixer
         #endregion
 
         #region 4. 暂停更新逻辑
-        private void RunPauseUpdateLogic()
+        private void RunPauseUpdateLogic(CancellationToken token)
         {
+            token.ThrowIfCancellationRequested();
             Log("==================================================");
             Log("      正在配置 Windows 更新暂停策略...");
             Log("==================================================\n");
@@ -662,12 +789,16 @@ namespace WinShareFixer
                 if (build < 9200)
                 {
                     Log("[1/2] 检测到 Windows 7 系统，直接关闭 Windows Update 服务...");
-                    RunQuietProcess("sc", "config wuauserv start= disabled");
-                    RunQuietProcess("net", "stop wuauserv");
-                    Log("        [成功] Win7 Windows Update 服务已停止并禁用。");
+                    int configCode = RunQuietProcess("sc", "config wuauserv start= disabled", token);
+                    int stopCode = RunQuietProcess("net", "stop wuauserv", token);
+                    if (configCode == 0 && (stopCode == 0 || stopCode == 2))
+                        Log("        [成功] Win7 Windows Update 服务已停止并禁用。");
+                    else
+                        Log("        [警告] Win7 Windows Update 服务处理返回码: config=" + configCode + ", stop=" + stopCode);
                 }
                 else
                 {
+                    token.ThrowIfCancellationRequested();
                     Log("[1/3] 配置 UpdatePolicy Settings...");
                     using (RegistryKey key = CreateLocalMachineSubKey(@"SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy\Settings"))
                     {
@@ -679,6 +810,7 @@ namespace WinShareFixer
                         }
                     }
 
+                    token.ThrowIfCancellationRequested();
                     Log("\n[2/3] 写入 UX Settings 暂停时间线至 2050 年...");
                     using (RegistryKey key = CreateLocalMachineSubKey(@"SOFTWARE\Microsoft\WindowsUpdate\UX\Settings"))
                     {
@@ -696,6 +828,7 @@ namespace WinShareFixer
                     }
                 }
 
+                token.ThrowIfCancellationRequested();
                 Log("\n[策略加固] 配置 AU 组策略级别关闭规则...");
                 using (RegistryKey key = CreateLocalMachineSubKey(@"SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"))
                 {
@@ -711,6 +844,7 @@ namespace WinShareFixer
                 Log("        [ OK ] Windows 自动更新策略已生效！");
                 Log("==================================================");
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 Log("\n        [错误] 写入注册表异常: " + ex.Message);
@@ -753,12 +887,33 @@ namespace WinShareFixer
 
         private int RunQuietProcess(string fileName, string arguments)
         {
-            return RunQuietProcessWithTimeout(fileName, arguments, 10000);
+            return RunQuietProcess(fileName, arguments, CancellationToken.None);
+        }
+
+        private int RunQuietProcess(string fileName, string arguments, CancellationToken token)
+        {
+            return RunQuietProcessWithTimeout(fileName, arguments, 10000, token);
         }
 
         // [修正] 移除未使用的 waitForExit 参数，简化方法签名
         private int RunQuietProcessWithTimeout(string fileName, string arguments, int timeoutMilliseconds)
         {
+            return RunQuietProcessWithTimeout(fileName, arguments, timeoutMilliseconds, CancellationToken.None);
+        }
+
+        private int RunQuietProcessWithTimeout(string fileName, string arguments, int timeoutMilliseconds, CancellationToken token)
+        {
+            ProcessExecutionResult result = ExecuteProcess(fileName, arguments, timeoutMilliseconds, false, token);
+            if (result.Cancelled) return -2;
+            if (result.TimedOut) return -1;
+            return result.ExitCode;
+        }
+
+        private ProcessExecutionResult ExecuteProcess(string fileName, string arguments, int timeoutMilliseconds, bool captureOutput, CancellationToken token)
+        {
+            ProcessExecutionResult result = new ProcessExecutionResult();
+            Process p = null;
+
             try
             {
                 ProcessStartInfo psi = new ProcessStartInfo
@@ -766,109 +921,143 @@ namespace WinShareFixer
                     FileName = fileName,
                     Arguments = arguments,
                     UseShellExecute = false,
+                    RedirectStandardOutput = captureOutput,
+                    RedirectStandardError = captureOutput,
                     CreateNoWindow = true,
                     WindowStyle = ProcessWindowStyle.Hidden
                 };
 
-                using (Process p = Process.Start(psi))
+                using (p = Process.Start(psi))
                 {
-                    if (p != null)
+                    if (p == null)
                     {
-                        if (p.WaitForExit(timeoutMilliseconds))
-                        {
-                            return p.ExitCode;
-                        }
-                        else
-                        {
-                            try { p.Kill(); } catch { }
-                            return -1;
-                        }
+                        result.Error = "进程启动失败。";
+                        return result;
                     }
-                }
-            }
-            catch { }
-            return -1;
-        }
 
-        // [修正] 修复标准输出/错误重定向可能导致的死锁问题
-        // 原代码先调用 WaitForExit 再读取输出，当输出超过系统缓冲区大小时会触发死锁。
-        // 现改用 BeginOutputReadLine / BeginErrorReadLine 进行异步读取。
-        private string RunPowerShellCommand(string cmd)
-        {
-            try
-            {
-                string encodedCommand = Convert.ToBase64String(Encoding.Unicode.GetBytes(cmd));
-                ProcessStartInfo psi = new ProcessStartInfo
-                {
-                    FileName = "powershell",
-                    Arguments = "-NoProfile -ExecutionPolicy Bypass -EncodedCommand " + encodedCommand,
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true
-                };
+                    result.Started = true;
+                    StringBuilder outputBuilder = captureOutput ? new StringBuilder() : null;
+                    StringBuilder errorBuilder = captureOutput ? new StringBuilder() : null;
 
-                using (Process p = Process.Start(psi))
-                {
-                    if (p != null)
+                    if (captureOutput)
                     {
-                        StringBuilder outputBuilder = new StringBuilder();
-                        StringBuilder errorBuilder = new StringBuilder();
-                        object outputLock = new object();
-                        object errorLock = new object();
-
                         p.OutputDataReceived += delegate(object sender, DataReceivedEventArgs args)
                         {
                             if (args.Data != null)
                             {
-                                lock (outputLock) { outputBuilder.AppendLine(args.Data); }
+                                outputBuilder.AppendLine(args.Data);
                             }
                         };
                         p.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs args)
                         {
                             if (args.Data != null)
                             {
-                                lock (errorLock) { errorBuilder.AppendLine(args.Data); }
+                                errorBuilder.AppendLine(args.Data);
                             }
                         };
 
                         p.BeginOutputReadLine();
                         p.BeginErrorReadLine();
-
-                        if (!p.WaitForExit(10000))
-                        {
-                            try { p.Kill(); } catch { }
-                            return string.Empty;
-                        }
-
-                        // 确保异步输出读取已完成
-                        p.WaitForExit();
-
-                        string output = outputBuilder.ToString();
-                        string error = errorBuilder.ToString();
-
-                        if (!string.IsNullOrEmpty(error) && !error.Contains("Microsoft.PowerShell") && !error.Contains("Warning"))
-                        {
-                            Log("        [调试] PowerShell 错误: " + error.Substring(0, Math.Min(100, error.Length)));
-                        }
-
-                        if (!string.IsNullOrEmpty(output)) return output;
-                        return error;
                     }
+
+                    DateTime deadline = timeoutMilliseconds > 0
+                        ? DateTime.UtcNow.AddMilliseconds(timeoutMilliseconds)
+                        : DateTime.MaxValue;
+
+                    while (true)
+                    {
+                        token.ThrowIfCancellationRequested();
+
+                        int waitSlice = 200;
+                        if (deadline != DateTime.MaxValue)
+                        {
+                            double remaining = (deadline - DateTime.UtcNow).TotalMilliseconds;
+                            if (remaining <= 0)
+                            {
+                                try { if (!p.HasExited) p.Kill(); } catch { }
+                                result.TimedOut = true;
+                                result.Error = "进程执行超时。";
+                                return result;
+                            }
+
+                            waitSlice = (int)Math.Min(waitSlice, remaining);
+                        }
+
+                        if (p.WaitForExit(waitSlice))
+                        {
+                            break;
+                        }
+                    }
+
+                    if (captureOutput)
+                    {
+                        p.WaitForExit();
+                        result.Output = outputBuilder.ToString();
+                        result.Error = errorBuilder.ToString();
+                    }
+
+                    result.ExitCode = p.ExitCode;
+                    return result;
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                try { if (p != null && !p.HasExited) p.Kill(); } catch { }
+                result.Cancelled = true;
+                result.Error = "操作已取消。";
+                return result;
             }
             catch (Exception ex)
             {
-                Log("        [调试] PowerShell 执行异常: " + ex.Message);
+                result.Error = ex.Message;
+                return result;
             }
-            return string.Empty;
         }
 
-        private void StartServiceApi(string serviceName, string displayName)
+        private string RunPowerShellCommand(string cmd, CancellationToken token, out bool success)
+        {
+            string encodedCommand = Convert.ToBase64String(Encoding.Unicode.GetBytes(cmd));
+            ProcessExecutionResult result = ExecuteProcess(
+                "powershell",
+                "-NoProfile -ExecutionPolicy Bypass -EncodedCommand " + encodedCommand,
+                10000,
+                true,
+                token);
+
+            if (result.Cancelled)
+            {
+                success = false;
+                return string.Empty;
+            }
+
+            if (result.TimedOut)
+            {
+                Log("        [调试] PowerShell 执行超时。");
+                success = false;
+                return string.Empty;
+            }
+
+            if (!string.IsNullOrEmpty(result.Error) && !result.Error.Contains("Microsoft.PowerShell") && !result.Error.Contains("Warning"))
+            {
+                Log("        [调试] PowerShell 错误: " + result.Error.Substring(0, Math.Min(100, result.Error.Length)));
+            }
+
+            if (result.ExitCode != 0)
+            {
+                success = false;
+                return string.Empty;
+            }
+
+            success = true;
+            return result.Output.Trim();
+        }
+
+        private void StartServiceApi(string serviceName, string displayName, CancellationToken token)
         {
             try
             {
-                RunQuietProcess("sc", "config \"" + serviceName + "\" start= auto");
+                token.ThrowIfCancellationRequested();
+                RunQuietProcess("sc", "config \"" + serviceName + "\" start= auto", token);
                 using (ServiceController sc = new ServiceController(serviceName))
                 {
                     if (sc.Status != ServiceControllerStatus.Running && sc.Status != ServiceControllerStatus.StartPending)
@@ -877,6 +1066,7 @@ namespace WinShareFixer
                         try
                         {
                             sc.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(20));
+                            token.ThrowIfCancellationRequested();
                             Log("        [成功] " + displayName + " 正常运行。");
                         }
                         catch (System.ServiceProcess.TimeoutException)
@@ -894,16 +1084,18 @@ namespace WinShareFixer
             {
                 Log("        [警告] " + displayName + " 不存在或无法访问，跳过。");
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 Log("        [警告] " + displayName + " 操作失败: " + ex.Message);
             }
         }
 
-        private void StopSpoolerServiceApi()
+        private void StopSpoolerServiceApi(CancellationToken token)
         {
             try
             {
+                token.ThrowIfCancellationRequested();
                 using (ServiceController sc = new ServiceController("Spooler"))
                 {
                     if (sc.Status != ServiceControllerStatus.Stopped && sc.Status != ServiceControllerStatus.StopPending)
@@ -914,14 +1106,17 @@ namespace WinShareFixer
                     }
                 }
             }
+            catch (OperationCanceledException) { throw; }
             catch
             {
-                RunQuietProcess("net", "stop Spooler /y");
+                RunQuietProcess("net", "stop Spooler /y", token);
             }
+            token.ThrowIfCancellationRequested();
             Thread.Sleep(1000);
+            token.ThrowIfCancellationRequested();
         }
 
-        private void RemoveGuestFromDenyLogon()
+        private void RemoveGuestFromDenyLogon(CancellationToken token)
         {
             int build = GetWindowsBuildNumber();
 
@@ -930,6 +1125,7 @@ namespace WinShareFixer
                 Log("        [提示] Windows 7 系统检测到，使用注册表直接修复方案...");
                 try
                 {
+                    token.ThrowIfCancellationRequested();
                     using (RegistryKey key = CreateLocalMachineSubKey(@"SYSTEM\CurrentControlSet\Control\Lsa"))
                     {
                         if (key != null)
@@ -939,6 +1135,7 @@ namespace WinShareFixer
                         }
                     }
                 }
+                catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
                     Log("        [警告] 注册表修复异常: " + ex.Message);
@@ -952,10 +1149,11 @@ namespace WinShareFixer
 
             try
             {
+                token.ThrowIfCancellationRequested();
                 if (File.Exists(cfgPath)) File.Delete(cfgPath);
                 if (File.Exists(sdbPath)) File.Delete(sdbPath);
 
-                int exportCode = RunQuietProcessWithTimeout("secedit", "/export /cfg \"" + cfgPath + "\"", 15000);
+                int exportCode = RunQuietProcessWithTimeout("secedit", "/export /cfg \"" + cfgPath + "\"", 15000, token);
                 
                 if (exportCode != 0)
                 {
@@ -982,6 +1180,7 @@ namespace WinShareFixer
 
                 for (int i = 0; i < lines.Length; i++)
                 {
+                    token.ThrowIfCancellationRequested();
                     if (lines[i].StartsWith("SeDenyNetworkLogonRight", StringComparison.OrdinalIgnoreCase))
                     {
                         string updated = RemoveGuestFromPolicyLine(lines[i]);
@@ -1000,7 +1199,7 @@ namespace WinShareFixer
                 }
 
                 File.WriteAllText(cfgPath, string.Join(Environment.NewLine, lines), Encoding.Unicode);
-                int configureCode = RunQuietProcessWithTimeout("secedit", "/configure /db \"" + sdbPath + "\" /cfg \"" + cfgPath + "\" /areas USER_RIGHTS /overwrite", 15000);
+                int configureCode = RunQuietProcessWithTimeout("secedit", "/configure /db \"" + sdbPath + "\" /cfg \"" + cfgPath + "\" /areas USER_RIGHTS /overwrite", 15000, token);
                 
                 if (configureCode == 0)
                     Log("        [成功] 本地安全策略中 Guest 网络拒绝拦截已清除！");
@@ -1010,6 +1209,7 @@ namespace WinShareFixer
                     Log("              但策略文件已修改，可能需要重启电脑生效。");
                 }
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 Log("        [警告] 清理 Guest 拒绝策略异常: " + ex.Message);
@@ -1052,63 +1252,83 @@ namespace WinShareFixer
             return Regex.IsMatch(token, @"^\*S-1-5-21-\d+-\d+-\d+-501$", RegexOptions.IgnoreCase);
         }
 
-        private void EnableFirewallRules()
+        private void EnableFirewallRules(CancellationToken token)
         {
             int build = GetWindowsBuildNumber();
+            bool anySucceeded = false;
 
             if (build >= 10240)
             {
-                RunQuietProcess("powershell", "-NoProfile -Command \"Enable-NetFirewallRule -DisplayGroup '文件和打印机共享','网络发现' -ErrorAction SilentlyContinue\"");
-                RunQuietProcess("powershell", "-NoProfile -Command \"Enable-NetFirewallRule -DisplayGroup 'File and Printer Sharing','Network Discovery' -ErrorAction SilentlyContinue\"");
+                if (RunQuietProcess("powershell", "-NoProfile -Command \"Enable-NetFirewallRule -DisplayGroup '文件和打印机共享','网络发现' -ErrorAction SilentlyContinue\"", token) == 0) anySucceeded = true;
+                if (RunQuietProcess("powershell", "-NoProfile -Command \"Enable-NetFirewallRule -DisplayGroup 'File and Printer Sharing','Network Discovery' -ErrorAction SilentlyContinue\"", token) == 0) anySucceeded = true;
             }
 
-            RunQuietProcess("netsh", "advfirewall firewall set rule group=\"文件和打印机共享\" new enable=Yes");
-            RunQuietProcess("netsh", "advfirewall firewall set rule group=\"网络发现\" new enable=Yes");
-            RunQuietProcess("netsh", "advfirewall firewall set rule group=\"File and Printer Sharing\" new enable=Yes");
-            RunQuietProcess("netsh", "advfirewall firewall set rule group=\"Network Discovery\" new enable=Yes");
+            if (RunQuietProcess("netsh", "advfirewall firewall set rule group=\"文件和打印机共享\" new enable=Yes", token) == 0) anySucceeded = true;
+            if (RunQuietProcess("netsh", "advfirewall firewall set rule group=\"网络发现\" new enable=Yes", token) == 0) anySucceeded = true;
+            if (RunQuietProcess("netsh", "advfirewall firewall set rule group=\"File and Printer Sharing\" new enable=Yes", token) == 0) anySucceeded = true;
+            if (RunQuietProcess("netsh", "advfirewall firewall set rule group=\"Network Discovery\" new enable=Yes", token) == 0) anySucceeded = true;
 
-            Log("        [成功] 防火墙共享与网络发现规则已正常放行。");
+            if (anySucceeded)
+                Log("        [成功] 防火墙共享与网络发现规则已正常放行。");
+            else
+                Log("        [警告] 防火墙规则启用命令未返回成功，请手动核查系统防火墙策略。");
         }
 
-        private void RefreshNetworkCache()
+        private void RefreshNetworkCache(CancellationToken token)
         {
             Log("        正在刷新 DNS 与 NetBIOS 网络缓存...");
-            RunQuietProcess("ipconfig", "/flushdns");
-            RunQuietProcess("nbtstat", "-R");
-            RunQuietProcess("nbtstat", "-RR");
-            Log("        [成功] 网络缓存刷新完成。");
+            int successCount = 0;
+            if (RunQuietProcess("ipconfig", "/flushdns", token) == 0) successCount++;
+            if (RunQuietProcess("nbtstat", "-R", token) == 0) successCount++;
+            if (RunQuietProcess("nbtstat", "-RR", token) == 0) successCount++;
+
+            if (successCount > 0)
+                Log("        [成功] 网络缓存刷新完成。");
+            else
+                Log("        [警告] 网络缓存刷新命令未返回成功，请手动检查网络组件状态。");
         }
 
-        private void FixRegistryPoliciesApi()
+        private bool FixRegistryPoliciesApi(CancellationToken token)
         {
+            bool success = true;
             try
             {
+                token.ThrowIfCancellationRequested();
                 using (RegistryKey key = CreateLocalMachineSubKey(@"SOFTWARE\Policies\Microsoft\Windows\LanmanWorkstation"))
                 {
                     if (key != null) key.SetValue("AllowInsecureGuestAuth", 1, RegistryValueKind.DWord);
+                    else success = false;
                 }
                 using (RegistryKey key = CreateLocalMachineSubKey(@"SYSTEM\CurrentControlSet\Control\Lsa"))
                 {
                     if (key != null) key.SetValue("LimitBlankPasswordUse", 0, RegistryValueKind.DWord);
+                    else success = false;
                 }
                 using (RegistryKey key = CreateLocalMachineSubKey(@"SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters"))
                 {
                     if (key != null) key.SetValue("RestrictNullSessAccess", 0, RegistryValueKind.DWord);
+                    else success = false;
                 }
+                return success;
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 Log("        [警告] API 写入注册表失败: " + ex.Message);
+                return false;
             }
         }
 
-        private void FixPrinterRegistryApi()
+        private bool FixPrinterRegistryApi(CancellationToken token)
         {
+            bool success = true;
             try
             {
+                token.ThrowIfCancellationRequested();
                 using (RegistryKey key = CreateLocalMachineSubKey(@"SYSTEM\CurrentControlSet\Control\Print"))
                 {
                     if (key != null) key.SetValue("RpcAuthnLevelPrivacyEnabled", 0, RegistryValueKind.DWord);
+                    else success = false;
                 }
                 using (RegistryKey key = CreateLocalMachineSubKey(@"SOFTWARE\Policies\Microsoft\Windows NT\Printers\RPC"))
                 {
@@ -1117,6 +1337,7 @@ namespace WinShareFixer
                         key.SetValue("RpcUseNamedPipeProtocol", 1, RegistryValueKind.DWord);
                         key.SetValue("RpcProtocols", 7, RegistryValueKind.DWord);
                     }
+                    else success = false;
                 }
                 using (RegistryKey key = CreateLocalMachineSubKey(@"SOFTWARE\Policies\Microsoft\Windows NT\Printers\PointAndPrint"))
                 {
@@ -1126,34 +1347,44 @@ namespace WinShareFixer
                         key.SetValue("NoWarningNoElevationOnInstall", 1, RegistryValueKind.DWord);
                         key.SetValue("UpdatePromptSettings", 2, RegistryValueKind.DWord);
                     }
+                    else success = false;
                 }
+                return success;
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 Log("        [警告] 打印机注册表写入异常: " + ex.Message);
+                return false;
             }
         }
 
-        private void FixLsaPoliciesApi()
+        private bool FixLsaPoliciesApi(CancellationToken token)
         {
             try
             {
+                token.ThrowIfCancellationRequested();
                 using (RegistryKey key = CreateLocalMachineSubKey(@"SYSTEM\CurrentControlSet\Control\Lsa"))
                 {
                     if (key != null)
                     {
                         key.SetValue("LimitBlankPasswordUse", 0, RegistryValueKind.DWord);
                         key.SetValue("forceguest", 0, RegistryValueKind.DWord);
+                        return true;
                     }
                 }
+                return false;
             }
+            catch (OperationCanceledException) { throw; }
             catch { }
+            return false;
         }
 
-        private void CleanSpoolPrintersDirectoryApi()
+        private void CleanSpoolPrintersDirectoryApi(CancellationToken token)
         {
             try
             {
+                token.ThrowIfCancellationRequested();
                 string spoolPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"spool\PRINTERS");
                 if (Directory.Exists(spoolPath))
                 {
@@ -1161,11 +1392,13 @@ namespace WinShareFixer
                     int count = 0;
                     foreach (string file in files)
                     {
+                        token.ThrowIfCancellationRequested();
                         try { File.Delete(file); count++; } catch { }
                     }
                     Log("        [成功] 打印临时队列文件夹已清空（共清除 " + count + " 个积压任务文件）。");
                 }
             }
+            catch (OperationCanceledException) { throw; }
             catch { }
         }
 
