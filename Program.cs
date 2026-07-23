@@ -55,14 +55,17 @@ namespace WinShareFixer
         private Label lblStatus;
 
         // 字体缓存（优化：避免频繁创建Font对象）
-        private static Font _fontBold10;
-        private static Font _fontBold95;
+        // 改为实例字段，避免多窗体实例间共享导致资源冲突或已释放异常
+        private Font _fontBold10;
+        private Font _fontBold95;
 
         public MainForm()
         {
             // 初始化字体缓存
-            _fontBold10 = new Font("Microsoft YaHei", 10F, FontStyle.Bold);
-            _fontBold95 = new Font("Microsoft YaHei", 9.5F, FontStyle.Bold);
+            if (_fontBold10 == null)
+                _fontBold10 = new Font("Microsoft YaHei", 10F, FontStyle.Bold);
+            if (_fontBold95 == null)
+                _fontBold95 = new Font("Microsoft YaHei", 9.5F, FontStyle.Bold);
 
             InitializeComponent();
             
@@ -537,7 +540,7 @@ namespace WinShareFixer
                 else
                 {
                     Log("        正在启用 SMB1Protocol...（CBS 事务执行中）");
-                    RunQuietProcessWithTimeout("powershell", "-NoProfile -ExecutionPolicy Bypass -Command \"Enable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart -ErrorAction SilentlyContinue\"", 20000, false);
+                    RunQuietProcessWithTimeout("powershell", "-NoProfile -ExecutionPolicy Bypass -Command \"Enable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart -ErrorAction SilentlyContinue\"", 20000);
 
                     Log("        正在等待 CBS 写入并校验 SMB1 激活状态...");
                     bool isEnabled = false;
@@ -750,10 +753,11 @@ namespace WinShareFixer
 
         private int RunQuietProcess(string fileName, string arguments)
         {
-            return RunQuietProcessWithTimeout(fileName, arguments, 10000, false);
+            return RunQuietProcessWithTimeout(fileName, arguments, 10000);
         }
 
-        private int RunQuietProcessWithTimeout(string fileName, string arguments, int timeoutMilliseconds, bool waitForExit)
+        // 移除未使用的 waitForExit 参数，简化方法签名
+        private int RunQuietProcessWithTimeout(string fileName, string arguments, int timeoutMilliseconds)
         {
             try
             {
@@ -786,6 +790,9 @@ namespace WinShareFixer
             return -1;
         }
 
+        // 修复标准输出/错误重定向可能导致的死锁问题
+        // 原代码先调用 WaitForExit 再读取输出，当输出超过系统缓冲区大小时会触发死锁。
+        // 现改用 BeginOutputReadLine / BeginErrorReadLine 进行异步读取。
         private string RunPowerShellCommand(string cmd)
         {
             try
@@ -805,22 +812,50 @@ namespace WinShareFixer
                 {
                     if (p != null)
                     {
+                        StringBuilder outputBuilder = new StringBuilder();
+                        StringBuilder errorBuilder = new StringBuilder();
+
+                        p.OutputDataReceived += delegate(object sender, DataReceivedEventArgs args)
+                        {
+                            if (args.Data != null)
+                            {
+                                lock (outputBuilder)
+                                {
+                                    if (outputBuilder.Length > 0) outputBuilder.Append("\n");
+                                    outputBuilder.Append(args.Data);
+                                }
+                            }
+                        };
+                        p.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs args)
+                        {
+                            if (args.Data != null)
+                            {
+                                lock (errorBuilder)
+                                {
+                                    if (errorBuilder.Length > 0) errorBuilder.Append("\n");
+                                    errorBuilder.Append(args.Data);
+                                }
+                            }
+                        };
+
+                        p.BeginOutputReadLine();
+                        p.BeginErrorReadLine();
+
                         if (!p.WaitForExit(10000))
                         {
                             try { p.Kill(); } catch { }
                             return string.Empty;
                         }
 
-                        string output = p.StandardOutput.ReadToEnd();
-                        string error = p.StandardError.ReadToEnd();
+                        string output = outputBuilder.ToString().Trim();
+                        string error = errorBuilder.ToString().Trim();
 
                         if (!string.IsNullOrEmpty(error) && !error.Contains("Microsoft.PowerShell") && !error.Contains("Warning"))
                         {
                             Log("        [调试] PowerShell 错误: " + error.Substring(0, Math.Min(100, error.Length)));
                         }
 
-                        if (!string.IsNullOrEmpty(output)) return output;
-                        return error;
+                        return string.IsNullOrEmpty(output) ? error : output;
                     }
                 }
             }
@@ -922,7 +957,7 @@ namespace WinShareFixer
                 if (File.Exists(cfgPath)) File.Delete(cfgPath);
                 if (File.Exists(sdbPath)) File.Delete(sdbPath);
 
-                int exportCode = RunQuietProcessWithTimeout("secedit", "/export /cfg \"" + cfgPath + "\"", 15000, false);
+                int exportCode = RunQuietProcessWithTimeout("secedit", "/export /cfg \"" + cfgPath + "\"", 15000);
                 
                 if (exportCode != 0)
                 {
@@ -967,7 +1002,7 @@ namespace WinShareFixer
                 }
 
                 File.WriteAllText(cfgPath, string.Join(Environment.NewLine, lines), Encoding.Unicode);
-                int configureCode = RunQuietProcessWithTimeout("secedit", "/configure /db \"" + sdbPath + "\" /cfg \"" + cfgPath + "\" /areas USER_RIGHTS /overwrite", 15000, false);
+                int configureCode = RunQuietProcessWithTimeout("secedit", "/configure /db \"" + sdbPath + "\" /cfg \"" + cfgPath + "\" /areas USER_RIGHTS /overwrite", 15000);
                 
                 if (configureCode == 0)
                     Log("        [成功] 本地安全策略中 Guest 网络拒绝拦截已清除！");
