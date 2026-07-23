@@ -55,7 +55,7 @@ namespace WinShareFixer
         private Label lblStatus;
 
         // 字体缓存（优化：避免频繁创建Font对象）
-        // 改为实例字段，避免多窗体实例间共享导致资源冲突或已释放异常
+        // [修正] 改为实例字段，避免多窗体实例间共享导致资源冲突或已释放异常
         private Font _fontBold10;
         private Font _fontBold95;
 
@@ -756,7 +756,7 @@ namespace WinShareFixer
             return RunQuietProcessWithTimeout(fileName, arguments, 10000);
         }
 
-        // 移除未使用的 waitForExit 参数，简化方法签名
+        // [修正] 移除未使用的 waitForExit 参数，简化方法签名
         private int RunQuietProcessWithTimeout(string fileName, string arguments, int timeoutMilliseconds)
         {
             try
@@ -790,7 +790,7 @@ namespace WinShareFixer
             return -1;
         }
 
-        // 修复标准输出/错误重定向可能导致的死锁问题
+        // [修正] 修复标准输出/错误重定向可能导致的死锁问题
         // 原代码先调用 WaitForExit 再读取输出，当输出超过系统缓冲区大小时会触发死锁。
         // 现改用 BeginOutputReadLine / BeginErrorReadLine 进行异步读取。
         private string RunPowerShellCommand(string cmd)
@@ -814,27 +814,21 @@ namespace WinShareFixer
                     {
                         StringBuilder outputBuilder = new StringBuilder();
                         StringBuilder errorBuilder = new StringBuilder();
+                        object outputLock = new object();
+                        object errorLock = new object();
 
                         p.OutputDataReceived += delegate(object sender, DataReceivedEventArgs args)
                         {
                             if (args.Data != null)
                             {
-                                lock (outputBuilder)
-                                {
-                                    if (outputBuilder.Length > 0) outputBuilder.Append("\n");
-                                    outputBuilder.Append(args.Data);
-                                }
+                                lock (outputLock) { outputBuilder.AppendLine(args.Data); }
                             }
                         };
                         p.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs args)
                         {
                             if (args.Data != null)
                             {
-                                lock (errorBuilder)
-                                {
-                                    if (errorBuilder.Length > 0) errorBuilder.Append("\n");
-                                    errorBuilder.Append(args.Data);
-                                }
+                                lock (errorLock) { errorBuilder.AppendLine(args.Data); }
                             }
                         };
 
@@ -847,15 +841,19 @@ namespace WinShareFixer
                             return string.Empty;
                         }
 
-                        string output = outputBuilder.ToString().Trim();
-                        string error = errorBuilder.ToString().Trim();
+                        // 确保异步输出读取已完成
+                        p.WaitForExit();
+
+                        string output = outputBuilder.ToString();
+                        string error = errorBuilder.ToString();
 
                         if (!string.IsNullOrEmpty(error) && !error.Contains("Microsoft.PowerShell") && !error.Contains("Warning"))
                         {
                             Log("        [调试] PowerShell 错误: " + error.Substring(0, Math.Min(100, error.Length)));
                         }
 
-                        return string.IsNullOrEmpty(output) ? error : output;
+                        if (!string.IsNullOrEmpty(output)) return output;
+                        return error;
                     }
                 }
             }
