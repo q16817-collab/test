@@ -247,42 +247,19 @@ namespace WinShareFixer
         private void LogSystemInformation()
         {
             int build = GetWindowsBuildNumber();
+            string osName = "Unknown OS";
+
+            if (build < 9200) osName = "Windows 7 / Server 2008 R2";
+            else if (build < 10240) osName = "Windows 8 / 8.1";
+            else if (build < 22000) osName = "Windows 10";
+            else if (build >= 26100) osName = "Windows 11 24H2+";
+            else if (build >= 22000) osName = "Windows 11";
+
             string arch = Environment.Is64BitOperatingSystem ? "x64" : "x86";
             bool isAdmin = IsAdmin();
 
-            string productName = "Unknown";
-            string editionId = "";
-            string releaseId = "";
-            string displayVersion = "";
-
-            try
-            {
-                using (RegistryKey key = OpenLocalMachineSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
-                {
-                    if (key != null)
-                    {
-                        productName = key.GetValue("ProductName") as string ?? "Unknown";
-                        editionId = key.GetValue("EditionID") as string ?? "";
-                        releaseId = key.GetValue("ReleaseId") as string ?? "";
-                        displayVersion = key.GetValue("DisplayVersion") as string ?? "";
-                    }
-                }
-            }
-            catch { }
-
-            string osInfo = productName;
-            if (!string.IsNullOrEmpty(displayVersion))
-            {
-                osInfo += " " + displayVersion;
-            }
-            else if (!string.IsNullOrEmpty(releaseId))
-            {
-                osInfo += " " + releaseId;
-            }
-            osInfo += " (Build " + build.ToString() + ") " + arch;
-
             Log("==================================================");
-            Log(" 操作系统: " + osInfo);
+            Log(" 操作系统: " + osName + " (Build " + build.ToString() + ") " + arch);
             Log(" 运行权限: Administrator: " + (isAdmin ? "YES" : "NO"));
             Log("==================================================\n");
         }
@@ -441,9 +418,12 @@ namespace WinShareFixer
 
             lock (_operationLock)
             {
-                timerToDispose = _currentTimeoutTimer;
-                _currentTimeoutTimer = null;
-                _currentOperationCts = null;
+                if (ReferenceEquals(_currentOperationCts, cts))
+                {
+                    timerToDispose = _currentTimeoutTimer;
+                    _currentTimeoutTimer = null;
+                    _currentOperationCts = null;
+                }
             }
 
             if (timerToDispose != null)
@@ -675,44 +655,78 @@ namespace WinShareFixer
                 }
                 else
                 {
-                    Log("        正在启用 SMB1Protocol...（CBS 事务执行中）");
-                    int enableCode = RunQuietProcessWithTimeout("powershell", "-NoProfile -ExecutionPolicy Bypass -Command \"Enable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart -ErrorAction SilentlyContinue\"", 20000, token);
-
-                    if (enableCode != 0 && enableCode != 3010)
+                    // 安全风险确认：SMB1 是已弃用协议，存在永恒之蓝等漏洞
+                    bool userConfirmed = false;
+                    if (!_isClosing)
                     {
-                        Log("        [警告] 启用 SMB1Protocol 命令返回码: " + enableCode);
+                        try
+                        {
+                            DialogResult dr = (DialogResult)this.Invoke(new Func<DialogResult>(() =>
+                                MessageBox.Show(
+                                    "SMB1 是微软已弃用的旧版协议，开启后存在以下安全风险：\r\n\r\n" +
+                                    "  - 永恒之蓝漏洞（EternalBlue）\r\n" +
+                                    "  - 勒索病毒传播（如 WannaCry）\r\n" +
+                                    "  - NTLM 中继攻击风险\r\n\r\n" +
+                                    "仅建议在需要兼容老旧设备（如 Windows XP）时开启。\r\n" +
+                                    "使用完毕后，建议尽快关闭 SMB1。\r\n\r\n" +
+                                    "是否继续启用 SMB1？",
+                                    "安全风险提示",
+                                    MessageBoxButtons.YesNo,
+                                    MessageBoxIcon.Warning)));
+                            userConfirmed = (dr == DialogResult.Yes);
+                        }
+                        catch { }
+                    }
+
+                    if (!userConfirmed)
+                    {
+                        Log("        [提示] 用户已取消 SMB1 启用操作。");
                         allSuccess = false;
                     }
                     else
                     {
-                        Log("        正在等待 CBS 写入并校验 SMB1 激活状态...");
-                        bool isEnabled = false;
-                        for (int i = 0; i < 15; i++)
+                        Log("        正在启用 SMB1Protocol...（CBS 事务执行中）");
+                        int enableCode = RunQuietProcessWithTimeout("powershell", "-NoProfile -ExecutionPolicy Bypass -Command \"Enable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart -ErrorAction SilentlyContinue\"", 20000, token);
+
+                        if (enableCode != 0 && enableCode != 3010)
                         {
-                            token.ThrowIfCancellationRequested();
-                            Thread.Sleep(2000);
-
-                            bool recheckSucceeded;
-                            string status = RunPowerShellCommand(checkCmd, token, out recheckSucceeded).Trim();
-                            if (!recheckSucceeded)
-                            {
-                                Log("        [警告] SMB1 激活状态复检失败，可能需要重启后再确认。");
-                                break;
-                            }
-
-                            if (status.Equals("Enabled", StringComparison.OrdinalIgnoreCase))
-                            {
-                                isEnabled = true;
-                                break;
-                            }
+                            Log("        [警告] 启用 SMB1Protocol 命令返回码: " + enableCode);
+                            allSuccess = false;
                         }
-
-                        if (isEnabled)
-                            Log("        [成功] SMB1 协议已成功激活并确认生效。");
                         else
                         {
-                            Log("        [警告] SMB1 协议已提交开启请求，后台 CBS 尚在处理中或需要重启电脑生效。");
-                            allSuccess = false;
+                            Log("        正在等待 CBS 写入并校验 SMB1 激活状态...");
+                            bool isEnabled = false;
+                            for (int i = 0; i < 15; i++)
+                            {
+                                token.ThrowIfCancellationRequested();
+                                Thread.Sleep(2000);
+
+                                bool recheckSucceeded;
+                                string status = RunPowerShellCommand(checkCmd, token, out recheckSucceeded).Trim();
+                                if (!recheckSucceeded)
+                                {
+                                    Log("        [警告] SMB1 激活状态复检失败，可能需要重启后再确认。");
+                                    break;
+                                }
+
+                                if (status.Equals("Enabled", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    isEnabled = true;
+                                    break;
+                                }
+                            }
+
+                            if (isEnabled)
+                            {
+                                Log("        [成功] SMB1 协议已成功激活并确认生效。");
+                                Log("        [警告] SMB1 已启用，降低了系统安全性。建议升级老旧设备后尽快关闭 SMB1。");
+                            }
+                            else
+                            {
+                                Log("        [警告] SMB1 协议已提交开启请求，后台 CBS 尚在处理中或需要重启电脑生效。");
+                                allSuccess = false;
+                            }
                         }
                     }
                 }
@@ -794,15 +808,7 @@ namespace WinShareFixer
             CleanSpoolPrintersDirectoryApi(token);
 
             Log("\n[5/6] 重新启动 Print Spooler 与 PrintNotify / 网络解析服务...");
-            int build = GetWindowsBuildNumber();
-            if (build >= 10240)
-            {
-                StartServiceApi("PrintNotify", "PrintNotify 打印通知服务", token);
-            }
-            else
-            {
-                Log("        [提示] Windows 7 无 PrintNotify 服务，已跳过。");
-            }
+            StartServiceApi("PrintNotify", "PrintNotify 打印通知服务", token);
             StartServiceApi("lmhosts", "lmhosts 服务", token);
             StartServiceApi("FDResPub", "FDResPub 服务", token);
             StartServiceApi("Spooler", "Print Spooler 打印后台服务", token);
@@ -853,7 +859,7 @@ namespace WinShareFixer
             {
                 if (build < 9200)
                 {
-                    Log("[1/2] 检测到 Windows 7 系统，直接关闭 Windows Update 服务...");
+                    Log("检测到 Windows 7 系统，直接关闭 Windows Update 服务...");
                     int configCode = RunQuietProcess("sc", "config wuauserv start= disabled", token);
                     int stopCode = RunQuietProcess("net", "stop wuauserv", token);
                     if (configCode == 0 && (stopCode == 0 || stopCode == 2))
@@ -884,18 +890,21 @@ namespace WinShareFixer
                     }
 
                     token.ThrowIfCancellationRequested();
-                    Log("\n[2/3] 写入 UX Settings 暂停时间线至 2050 年...");
+                    Log("\n[2/3] 写入 UX Settings 暂停时间线（当前 ～ 10 年后）...");
                     using (RegistryKey key = CreateLocalMachineSubKey(@"SOFTWARE\Microsoft\WindowsUpdate\UX\Settings"))
                     {
                         if (key != null)
                         {
+                            string now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                            string future = DateTime.UtcNow.AddYears(10).ToString("yyyy-MM-ddTHH:mm:ssZ");
+
                             key.SetValue("FlightSettingsMaxPauseDays", 10000, RegistryValueKind.DWord);
-                            key.SetValue("PauseFeatureUpdatesStartTime", "2023-07-07T10:00:52Z", RegistryValueKind.String);
-                            key.SetValue("PauseFeatureUpdatesEndTime", "2050-09-05T09:59:52Z", RegistryValueKind.String);
-                            key.SetValue("PauseQualityUpdatesStartTime", "2023-07-07T10:00:52Z", RegistryValueKind.String);
-                            key.SetValue("PauseQualityUpdatesEndTime", "2050-09-05T09:59:52Z", RegistryValueKind.String);
-                            key.SetValue("PauseUpdatesStartTime", "2023-07-07T09:59:52Z", RegistryValueKind.String);
-                            key.SetValue("PauseUpdatesExpiryTime", "2050-09-05T09:59:52Z", RegistryValueKind.String);
+                            key.SetValue("PauseFeatureUpdatesStartTime", now, RegistryValueKind.String);
+                            key.SetValue("PauseFeatureUpdatesEndTime", future, RegistryValueKind.String);
+                            key.SetValue("PauseQualityUpdatesStartTime", now, RegistryValueKind.String);
+                            key.SetValue("PauseQualityUpdatesEndTime", future, RegistryValueKind.String);
+                            key.SetValue("PauseUpdatesStartTime", now, RegistryValueKind.String);
+                            key.SetValue("PauseUpdatesExpiryTime", future, RegistryValueKind.String);
                             Log("        [成功] UX Settings 暂停时间线写入完成。");
                         }
                         else
@@ -924,6 +933,11 @@ namespace WinShareFixer
                 }
 
                 Log("\n==================================================");
+                Log("                    最终验证");
+                Log("==================================================");
+                Log("  自动更新策略......." + GetRegistryValueDisplay(@"SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU", "NoAutoUpdate", "1"));
+                Log("  UX 暂停到期........" + GetPauseExpiryDisplay());
+                Log("==================================================");
                 if (allSuccess)
                     Log("        [ OK ] Windows 自动更新策略已生效！");
                 else
@@ -1125,11 +1139,7 @@ namespace WinShareFixer
                 return string.Empty;
             }
 
-            if (!string.IsNullOrEmpty(result.Error) &&
-                !result.Error.Contains("#< CLIXML") &&
-                !result.Error.Contains("<Objs") &&
-                !result.Error.Contains("Microsoft.PowerShell") &&
-                !result.Error.Contains("Warning"))
+            if (!string.IsNullOrEmpty(result.Error) && !result.Error.Contains("Microsoft.PowerShell") && !result.Error.Contains("Warning"))
             {
                 Log("        [调试] PowerShell 错误: " + result.Error.Substring(0, Math.Min(100, result.Error.Length)));
             }
@@ -1366,35 +1376,21 @@ namespace WinShareFixer
         private void EnableFirewallRules(CancellationToken token)
         {
             int build = GetWindowsBuildNumber();
-            bool isChineseLocale = System.Globalization.CultureInfo.InstalledUICulture.Name.StartsWith("zh", StringComparison.OrdinalIgnoreCase);
             int attemptCount = 0;
             int successCount = 0;
 
             if (build >= 10240)
             {
-                attemptCount += 1;
-                if (isChineseLocale)
-                {
-                    if (RunQuietProcess("powershell", "-NoProfile -Command \"Enable-NetFirewallRule -DisplayGroup '文件和打印机共享','网络发现' -ErrorAction SilentlyContinue\"", token) == 0) successCount++;
-                }
-                else
-                {
-                    if (RunQuietProcess("powershell", "-NoProfile -Command \"Enable-NetFirewallRule -DisplayGroup 'File and Printer Sharing','Network Discovery' -ErrorAction SilentlyContinue\"", token) == 0) successCount++;
-                }
+                attemptCount += 2;
+                if (RunQuietProcess("powershell", "-NoProfile -Command \"Enable-NetFirewallRule -DisplayGroup '文件和打印机共享','网络发现' -ErrorAction SilentlyContinue\"", token) == 0) successCount++;
+                if (RunQuietProcess("powershell", "-NoProfile -Command \"Enable-NetFirewallRule -DisplayGroup 'File and Printer Sharing','Network Discovery' -ErrorAction SilentlyContinue\"", token) == 0) successCount++;
             }
 
-            if (isChineseLocale)
-            {
-                attemptCount += 2;
-                if (RunQuietProcess("netsh", "advfirewall firewall set rule group=\"文件和打印机共享\" new enable=Yes", token) == 0) successCount++;
-                if (RunQuietProcess("netsh", "advfirewall firewall set rule group=\"网络发现\" new enable=Yes", token) == 0) successCount++;
-            }
-            else
-            {
-                attemptCount += 2;
-                if (RunQuietProcess("netsh", "advfirewall firewall set rule group=\"File and Printer Sharing\" new enable=Yes", token) == 0) successCount++;
-                if (RunQuietProcess("netsh", "advfirewall firewall set rule group=\"Network Discovery\" new enable=Yes", token) == 0) successCount++;
-            }
+            attemptCount += 4;
+            if (RunQuietProcess("netsh", "advfirewall firewall set rule group=\"文件和打印机共享\" new enable=Yes", token) == 0) successCount++;
+            if (RunQuietProcess("netsh", "advfirewall firewall set rule group=\"网络发现\" new enable=Yes", token) == 0) successCount++;
+            if (RunQuietProcess("netsh", "advfirewall firewall set rule group=\"File and Printer Sharing\" new enable=Yes", token) == 0) successCount++;
+            if (RunQuietProcess("netsh", "advfirewall firewall set rule group=\"Network Discovery\" new enable=Yes", token) == 0) successCount++;
 
             if (successCount == attemptCount)
                 Log("        [成功] 防火墙共享与网络发现规则已正常放行。");
@@ -1407,22 +1403,11 @@ namespace WinShareFixer
         private void RefreshNetworkCache(CancellationToken token)
         {
             Log("        正在刷新 DNS 与 NetBIOS 网络缓存...");
-            int attemptCount = 1;
+            int attemptCount = 3;
             int successCount = 0;
-            
             if (RunQuietProcess("ipconfig", "/flushdns", token) == 0) successCount++;
-
-            int build = GetWindowsBuildNumber();
-            if (build < 26100)
-            {
-                attemptCount += 2;
-                if (RunQuietProcess("nbtstat", "-R", token) == 0) successCount++;
-                if (RunQuietProcess("nbtstat", "-RR", token) == 0) successCount++;
-            }
-            else
-            {
-                Log("        [提示] Windows 11 24H2+ 已移除 nbtstat 工具，跳过 NetBIOS 缓存刷新。");
-            }
+            if (RunQuietProcess("nbtstat", "-R", token) == 0) successCount++;
+            if (RunQuietProcess("nbtstat", "-RR", token) == 0) successCount++;
 
             if (successCount == attemptCount)
                 Log("        [成功] 网络缓存刷新完成。");
@@ -1533,13 +1518,28 @@ namespace WinShareFixer
                 if (Directory.Exists(spoolPath))
                 {
                     string[] files = Directory.GetFiles(spoolPath);
-                    int count = 0;
+                    int successCount = 0;
+                    int failCount = 0;
                     foreach (string file in files)
                     {
                         token.ThrowIfCancellationRequested();
-                        try { File.Delete(file); count++; } catch { }
+                        try { File.Delete(file); successCount++; }
+                        catch
+                        {
+                            try
+                            {
+                                RunQuietProcess("takeown", "/F \"" + file + "\"", token);
+                                RunQuietProcess("icacls", "\"" + file + "\" /grant Administrators:F", token);
+                                File.Delete(file);
+                                successCount++;
+                            }
+                            catch { failCount++; }
+                        }
                     }
-                    Log("        [成功] 打印临时队列文件夹已清空（共清除 " + count + " 个积压任务文件）。");
+                    if (failCount == 0)
+                        Log("        [成功] 打印临时队列文件夹已清空（共清除 " + successCount + " 个积压任务文件）。");
+                    else
+                        Log("        [警告] 打印临时队列清理完成（成功删除 " + successCount + " 个，失败 " + failCount + " 个）。");
                 }
             }
             catch (OperationCanceledException) { throw; }
@@ -1558,6 +1558,44 @@ namespace WinShareFixer
             catch { return false; }
         }
 
+        private string GetPauseExpiryDisplay()
+        {
+            try
+            {
+                using (RegistryKey key = OpenLocalMachineSubKey(@"SOFTWARE\Microsoft\WindowsUpdate\UX\Settings"))
+                {
+                    if (key != null)
+                    {
+                        object val = key.GetValue("PauseUpdatesExpiryTime");
+                        if (val != null)
+                            return "[成功] 到期: " + val.ToString();
+                    }
+                }
+            }
+            catch { }
+            return "[错误] 未配置";
+        }
+
+        private string GetRegistryValueDisplay(string subKey, string valueName, string expectedValue)
+        {
+            try
+            {
+                using (RegistryKey key = OpenLocalMachineSubKey(subKey))
+                {
+                    if (key != null)
+                    {
+                        object val = key.GetValue(valueName);
+                        if (val != null && val.ToString() == expectedValue)
+                            return "[成功] 已配置";
+                        if (val != null)
+                            return "[警告] 当前值: " + val.ToString();
+                    }
+                }
+            }
+            catch { }
+            return "[错误] 未配置";
+        }
+
         private string GetServiceStatusDisplay(string serviceName)
         {
             return IsServiceRunning(serviceName) ? "[成功] 正常" : "[错误] 停止";
@@ -1567,28 +1605,12 @@ namespace WinShareFixer
         {
             try
             {
-                int build = GetWindowsBuildNumber();
-
-                if (build < 9200)
+                using (RegistryKey key = OpenLocalMachineSubKey(@"SOFTWARE\Policies\Microsoft\Windows\LanmanWorkstation"))
                 {
-                    using (RegistryKey key = OpenLocalMachineSubKey(@"SYSTEM\CurrentControlSet\Control\Lsa"))
+                    if (key != null)
                     {
-                        if (key != null)
-                        {
-                            object val = key.GetValue("LimitBlankPasswordUse");
-                            if (val is int && (int)val == 0) return "[成功] 允许";
-                        }
-                    }
-                }
-                else
-                {
-                    using (RegistryKey key = OpenLocalMachineSubKey(@"SOFTWARE\Policies\Microsoft\Windows\LanmanWorkstation"))
-                    {
-                        if (key != null)
-                        {
-                            object val = key.GetValue("AllowInsecureGuestAuth");
-                            if (val is int && (int)val == 1) return "[成功] 允许";
-                        }
+                        object val = key.GetValue("AllowInsecureGuestAuth");
+                        if (val is int && (int)val == 1) return "[成功] 允许";
                     }
                 }
             }
