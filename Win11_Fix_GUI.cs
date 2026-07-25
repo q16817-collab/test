@@ -5,7 +5,7 @@ using System.Drawing;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
-using System.Management;          // 新增，用于获取完整密钥
+using System.Management;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Reflection;
@@ -96,11 +96,37 @@ namespace Win11FixGUI
 
         private int _activeTasks = 0;
 
+        // ---------- 注册表/系统常量 ----------
+        private const string CLASSIC_MENU_KEY_PATH = @"Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32";
+        private const string MOUSE_REGISTRY_PATH = @"Control Panel\Mouse";
+        private const string BUILD_KEY_PATH = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+        private const string ACTIVATION_SCRIPT_URL = "https://get.activated.win";
+
+        // ---------- 缓存的字体对象（避免重复创建） ----------
+        private readonly Font _logTagFont;
+        private readonly Font _logContentFont;
+        private readonly Font _logMutedFont;
+
         public MainForm()
         {
+            _logTagFont = new Font("Consolas", 9F, FontStyle.Bold);
+            _logContentFont = new Font("Consolas", 9F, FontStyle.Regular);
+            _logMutedFont = new Font("Consolas", 9F, FontStyle.Regular);
+
             InitializeComponent();
             this.Shown += (sender, e) => InitializeSystemInfo();
             this.FormClosing += MainForm_FormClosing;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _logTagFont?.Dispose();
+                _logContentFont?.Dispose();
+                _logMutedFont?.Dispose();
+            }
+            base.Dispose(disposing);
         }
 
         // ---------- 初始化 UI 组件 ----------
@@ -282,7 +308,7 @@ namespace Win11FixGUI
         {
             try
             {
-                using (RegistryKey key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
+                using (RegistryKey key = Registry.LocalMachine.OpenSubKey(BUILD_KEY_PATH))
                 {
                     if (key != null)
                     {
@@ -323,8 +349,7 @@ namespace Win11FixGUI
         {
             try
             {
-                const string keyPath = @"Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32";
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(keyPath))
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(CLASSIC_MENU_KEY_PATH))
                 {
                     return key != null;
                 }
@@ -332,7 +357,7 @@ namespace Win11FixGUI
             catch { return false; }
         }
 
-        // ---------- 日志方法（重命名以避免与 System.Diagnostics.Log 冲突） ----------
+        // ---------- 日志方法 ----------
         private void WriteLog(string text)
         {
             if (this.IsDisposed || !this.IsHandleCreated) return;
@@ -343,46 +368,53 @@ namespace Win11FixGUI
                 return;
             }
 
-            text = text.TrimStart('\r', '\n');
-
-            int closeBracket = text.IndexOf(']');
-            if (text.StartsWith("[") && closeBracket > 0)
+            try
             {
-                string tag = text.Substring(0, closeBracket + 1);
-                string content = text.Substring(closeBracket + 1);
+                text = text.TrimStart('\r', '\n');
 
-                Color tagColor = Color.FromArgb(100, 181, 246);
-                if (tag.Contains("错误")) tagColor = Color.FromArgb(255, 99, 99);
-                else if (tag.Contains("成功")) tagColor = Color.FromArgb(87, 219, 131);
-                else if (tag.Contains("警告")) tagColor = Color.FromArgb(255, 193, 7);
-                else if (tag.Contains("状态")) tagColor = Color.FromArgb(0, 230, 255);
-                else if (tag.Contains("密钥")) tagColor = Color.FromArgb(255, 180, 50);
-                else if (tag.Contains("过期")) tagColor = Color.FromArgb(255, 150, 150);
-                else if (tag.Contains("提示") || tag.Contains("操作") || tag.Contains("解压") || tag.Contains("清理"))
-                    tagColor = Color.FromArgb(100, 181, 246);
+                int closeBracket = text.IndexOf(']');
+                if (text.StartsWith("[") && closeBracket > 0)
+                {
+                    string tag = text.Substring(0, closeBracket + 1);
+                    string content = text.Substring(closeBracket + 1);
 
-                this.txtLog.SelectionStart = this.txtLog.TextLength;
-                this.txtLog.SelectionLength = 0;
-                this.txtLog.SelectionColor = tagColor;
-                this.txtLog.SelectionFont = new Font(this.txtLog.Font, FontStyle.Bold);
-                this.txtLog.AppendText(tag);
+                    Color tagColor = Color.FromArgb(100, 181, 246);
+                    if (tag.Contains("错误")) tagColor = Color.FromArgb(255, 99, 99);
+                    else if (tag.Contains("成功")) tagColor = Color.FromArgb(87, 219, 131);
+                    else if (tag.Contains("警告")) tagColor = Color.FromArgb(255, 193, 7);
+                    else if (tag.Contains("状态")) tagColor = Color.FromArgb(0, 230, 255);
+                    else if (tag.Contains("密钥")) tagColor = Color.FromArgb(255, 180, 50);
+                    else if (tag.Contains("过期")) tagColor = Color.FromArgb(255, 150, 150);
+                    else if (tag.Contains("提示") || tag.Contains("操作") || tag.Contains("解压") || tag.Contains("清理"))
+                        tagColor = Color.FromArgb(100, 181, 246);
 
-                this.txtLog.SelectionStart = this.txtLog.TextLength;
-                this.txtLog.SelectionLength = 0;
-                this.txtLog.SelectionColor = Color.FromArgb(230, 235, 240);
-                this.txtLog.SelectionFont = new Font(this.txtLog.Font, FontStyle.Regular);
-                this.txtLog.AppendText(content + "\n");
+                    this.txtLog.SelectionStart = this.txtLog.TextLength;
+                    this.txtLog.SelectionLength = 0;
+                    this.txtLog.SelectionColor = tagColor;
+                    this.txtLog.SelectionFont = _logTagFont;
+                    this.txtLog.AppendText(tag);
+
+                    this.txtLog.SelectionStart = this.txtLog.TextLength;
+                    this.txtLog.SelectionLength = 0;
+                    this.txtLog.SelectionColor = Color.FromArgb(230, 235, 240);
+                    this.txtLog.SelectionFont = _logContentFont;
+                    this.txtLog.AppendText(content + "\n");
+                }
+                else
+                {
+                    this.txtLog.SelectionStart = this.txtLog.TextLength;
+                    this.txtLog.SelectionLength = 0;
+                    this.txtLog.SelectionColor = Color.FromArgb(200, 205, 210);
+                    this.txtLog.SelectionFont = _logMutedFont;
+                    this.txtLog.AppendText(text + "\n");
+                }
+
+                this.txtLog.ScrollToCaret();
             }
-            else
+            catch (ObjectDisposedException)
             {
-                this.txtLog.SelectionStart = this.txtLog.TextLength;
-                this.txtLog.SelectionLength = 0;
-                this.txtLog.SelectionColor = Color.FromArgb(200, 205, 210);
-                this.txtLog.SelectionFont = new Font(this.txtLog.Font, FontStyle.Regular);
-                this.txtLog.AppendText(text + "\n");
+                // 窗体已释放，忽略日志写入
             }
-
-            this.txtLog.ScrollToCaret();
         }
 
         // ---------- 按钮启用控制 ----------
@@ -396,30 +428,37 @@ namespace Win11FixGUI
                 return;
             }
 
-            Action<Control.ControlCollection> toggleButtons = null;
-            toggleButtons = (controls) =>
+            try
             {
-                foreach (Control c in controls)
+                Action<Control.ControlCollection> toggleButtons = null;
+                toggleButtons = (controls) =>
                 {
-                    Button btn = c as Button;
-                    if (btn != null)
+                    foreach (Control c in controls)
                     {
-                        if (btn == btnRestoreClassicMenu && (!isWin11 || isClassicMenuEnabled))
+                        Button btn = c as Button;
+                        if (btn != null)
                         {
-                            btn.Enabled = false;
-                            btn.Cursor = Cursors.Default;
-                            continue;
+                            if (btn == btnRestoreClassicMenu && (!isWin11 || isClassicMenuEnabled))
+                            {
+                                btn.Enabled = false;
+                                btn.Cursor = Cursors.Default;
+                                continue;
+                            }
+
+                            btn.Enabled = enabled;
+                            btn.Cursor = enabled ? Cursors.Hand : Cursors.Default;
                         }
-
-                        btn.Enabled = enabled;
-                        btn.Cursor = enabled ? Cursors.Hand : Cursors.Default;
+                        if (c.HasChildren)
+                            toggleButtons(c.Controls);
                     }
-                    if (c.HasChildren)
-                        toggleButtons(c.Controls);
-                }
-            };
+                };
 
-            toggleButtons(this.Controls);
+                toggleButtons(this.Controls);
+            }
+            catch (ObjectDisposedException)
+            {
+                // 窗体已释放，忽略
+            }
         }
 
         private void UpdateUI()
@@ -432,10 +471,38 @@ namespace Win11FixGUI
                 return;
             }
 
-            if (!isWin11 || isClassicMenuEnabled)
+            try
             {
-                this.btnRestoreClassicMenu.Enabled = false;
-                this.btnRestoreClassicMenu.Cursor = Cursors.Default;
+                if (!isWin11 || isClassicMenuEnabled)
+                {
+                    this.btnRestoreClassicMenu.Enabled = false;
+                    this.btnRestoreClassicMenu.Cursor = Cursors.Default;
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                // 窗体已释放，忽略
+            }
+        }
+
+        // ---------- 通用系统命令执行方法 ----------
+        /// <summary>
+        /// 启动一个系统命令（如 .msc、.cpl 等），自动处理日志和异常。
+        /// </summary>
+        private void RunSystemCommand(string command, string actionDescription, string successMessage, string errorMessage)
+        {
+            try
+            {
+                WriteLog(string.Format("[操作] 正在{0}...", actionDescription));
+                using (Process.Start(new ProcessStartInfo(command) { UseShellExecute = true }))
+                {
+                    // 释放 Process 对象，子进程继续运行
+                }
+                WriteLog(string.Format("[成功] {0}", successMessage));
+            }
+            catch (Exception ex)
+            {
+                WriteLog(string.Format("[错误] {0}: {1}", errorMessage, ex.Message));
             }
         }
 
@@ -445,10 +512,10 @@ namespace Win11FixGUI
             Task.Run(() =>
             {
                 Interlocked.Increment(ref _activeTasks);
-                SetButtonsEnabled(false);
-
                 try
                 {
+                    SetButtonsEnabled(false);
+
                     string tempRoot = Path.Combine(Application.StartupPath, "temp");
                     string targetDir = Path.Combine(tempRoot, Guid.NewGuid().ToString("N"));
                     Directory.CreateDirectory(targetDir);
@@ -472,7 +539,7 @@ namespace Win11FixGUI
                         ZipFile.ExtractToDirectory(targetFilePath, targetDir);
                         File.Delete(targetFilePath);
                         WriteLog(string.Format("[成功] 已解压至: {0}", targetDir));
-                        Process.Start("explorer.exe", targetDir);
+                        using (Process.Start("explorer.exe", targetDir)) { }
                     }
                     else if (fileName.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase) ||
                              fileName.EndsWith(".bat", StringComparison.OrdinalIgnoreCase))
@@ -573,8 +640,7 @@ namespace Win11FixGUI
             try
             {
                 WriteLog("[操作] 正在还原经典右键菜单...");
-                const string keyPath = @"Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32";
-                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(keyPath))
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(CLASSIC_MENU_KEY_PATH))
                 {
                     if (key != null) key.SetValue("", "");
                 }
@@ -599,7 +665,7 @@ namespace Win11FixGUI
             {
                 WriteLog("[操作] 正在关闭鼠标精准定位 (禁用鼠标加速)...");
 
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Control Panel\Mouse", true))
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(MOUSE_REGISTRY_PATH, true))
                 {
                     if (key != null)
                     {
@@ -646,7 +712,7 @@ namespace Win11FixGUI
                     p.WaitForExit(1000);
                 }
                 Thread.Sleep(300);
-                Process.Start("explorer.exe");
+                using (Process.Start("explorer.exe")) { }
             }
             catch (Exception ex)
             {
@@ -659,14 +725,14 @@ namespace Win11FixGUI
             try
             {
                 WriteLog("[操作] 正在请求在线激活服务...");
-                string script = "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://get.activated.win | iex";
+                string script = string.Format("[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm {0} | iex", ACTIVATION_SCRIPT_URL);
 
                 ProcessStartInfo psi = new ProcessStartInfo("powershell.exe", string.Format("-NoExit -Command \"{0}\"", script))
                 {
                     UseShellExecute = false,
                     CreateNoWindow = false
                 };
-                Process.Start(psi);
+                using (Process.Start(psi)) { }
                 WriteLog("[成功] 已调起在线激活 PowerShell 脚本。");
             }
             catch (Exception ex)
@@ -680,16 +746,16 @@ namespace Win11FixGUI
             RunEmbeddedTool("MAS.cmd");
         }
 
-        // ---------- 新增：查询激活状态 ----------
+        // ---------- 查询激活状态 ----------
         private void BtnCheckActivation_Click(object sender, EventArgs e)
         {
             Task.Run(() =>
             {
                 Interlocked.Increment(ref _activeTasks);
-                SetButtonsEnabled(false);
-
                 try
                 {
+                    SetButtonsEnabled(false);
+
                     WriteLog("[操作] 正在查询 Windows 激活状态...");
                     string systemDir = Environment.GetFolderPath(Environment.SpecialFolder.System);
                     string slmgrPath = Path.Combine(systemDir, "slmgr.vbs");
@@ -736,13 +802,13 @@ namespace Win11FixGUI
             };
             using (Process p = Process.Start(psi))
             {
-                string output = p.StandardOutput.ReadToEnd();
+                // 先等待进程退出，再读取输出，避免死锁
                 p.WaitForExit();
-                return output;
+                return p.StandardOutput.ReadToEnd();
             }
         }
 
-        // 获取完整产品密钥（新增）
+        // 获取完整产品密钥
         private string GetFullProductKey()
         {
             try
@@ -866,9 +932,13 @@ namespace Win11FixGUI
             {
                 WriteLog("[操作] 正在调起系统设置页面...");
                 if (buildNumber < 10240)
-                    Process.Start(new ProcessStartInfo("rundll32.exe", "shell32.dll,Options_RunDLL 1") { UseShellExecute = true });
+                {
+                    using (Process.Start(new ProcessStartInfo("rundll32.exe", "shell32.dll,Options_RunDLL 1") { UseShellExecute = true })) { }
+                }
                 else
-                    Process.Start(new ProcessStartInfo("ms-settings:taskbar") { UseShellExecute = true });
+                {
+                    using (Process.Start(new ProcessStartInfo("ms-settings:taskbar") { UseShellExecute = true })) { }
+                }
                 WriteLog("[成功] 已调起系统任务栏设置。");
             }
             catch (Exception ex)
@@ -879,16 +949,7 @@ namespace Win11FixGUI
 
         private void BtnDesktopShowIcons_Click(object sender, EventArgs e)
         {
-            try
-            {
-                WriteLog("[操作] 正在调起桌面图标设置...");
-                Process.Start(new ProcessStartInfo("control", "desk.cpl,,@0,3") { UseShellExecute = true });
-                WriteLog("[成功] 已打开桌面图标设置界面。");
-            }
-            catch (Exception ex)
-            {
-                WriteLog("[错误] 打开失败: " + ex.Message);
-            }
+            RunSystemCommand("control", "desk.cpl,,@0,3", "调起桌面图标设置", "已打开桌面图标设置界面。", "打开失败");
         }
 
         private void BtnControlPanel_Click(object sender, EventArgs e)
@@ -902,7 +963,7 @@ namespace Win11FixGUI
                     Arguments = "shell:::{21EC2020-3AEA-1069-A2DD-08002B30309D}",
                     UseShellExecute = true
                 };
-                Process.Start(psi);
+                using (Process.Start(psi)) { }
                 WriteLog("[成功] 已打开控制面板（所有控制面板项）。");
             }
             catch (Exception ex)
@@ -910,7 +971,7 @@ namespace Win11FixGUI
                 WriteLog("[错误] Shell方式调起失败: " + ex.Message);
                 try
                 {
-                    Process.Start(new ProcessStartInfo("control.exe") { UseShellExecute = true });
+                    using (Process.Start(new ProcessStartInfo("control.exe") { UseShellExecute = true })) { }
                     WriteLog("[成功] 通过备用指令打开控制面板。");
                 }
                 catch (Exception innerEx)
@@ -922,30 +983,12 @@ namespace Win11FixGUI
 
         private void BtnSecpol_Click(object sender, EventArgs e)
         {
-            try
-            {
-                WriteLog("[操作] 正在打开本地安全策略...");
-                Process.Start(new ProcessStartInfo("secpol.msc") { UseShellExecute = true });
-                WriteLog("[成功] 已打开本地安全策略。");
-            }
-            catch (Exception ex)
-            {
-                WriteLog("[错误] 打开本地安全策略失败: " + ex.Message + " (注: 家庭版系统无此策略组件)");
-            }
+            RunSystemCommand("secpol.msc", "打开本地安全策略", "已打开本地安全策略。", "打开本地安全策略失败 (注: 家庭版系统无此策略组件)");
         }
 
         private void BtnServices_Click(object sender, EventArgs e)
         {
-            try
-            {
-                WriteLog("[操作] 正在打开系统服务管理...");
-                Process.Start(new ProcessStartInfo("services.msc") { UseShellExecute = true });
-                WriteLog("[成功] 已打开系统服务管理。");
-            }
-            catch (Exception ex)
-            {
-                WriteLog("[错误] 打开系统服务失败: " + ex.Message);
-            }
+            RunSystemCommand("services.msc", "打开系统服务管理", "已打开系统服务管理。", "打开系统服务失败");
         }
 
         private void BtnNetworkInfo_Click(object sender, EventArgs e)
@@ -1007,7 +1050,7 @@ namespace Win11FixGUI
                     RedirectStandardOutput = true,
                     UseShellExecute = false,
                     CreateNoWindow = true,
-                    StandardOutputEncoding = Encoding.GetEncoding(936)
+                    StandardOutputEncoding = Encoding.Default
                 };
 
                 using (Process p = Process.Start(psi))
@@ -1041,7 +1084,7 @@ namespace Win11FixGUI
                                 RedirectStandardOutput = true,
                                 UseShellExecute = false,
                                 CreateNoWindow = true,
-                                StandardOutputEncoding = Encoding.GetEncoding(936)
+                                StandardOutputEncoding = Encoding.Default
                             };
 
                             using (Process pwdP = Process.Start(pwdPsi))
