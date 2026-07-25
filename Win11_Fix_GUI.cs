@@ -957,10 +957,14 @@ namespace Win11FixGUI
         {
             try
             {
+                int currentSessionId = Process.GetCurrentProcess().SessionId;
                 foreach (Process p in Process.GetProcessesByName("explorer"))
                 {
-                    p.Kill();
-                    p.WaitForExit(1000);
+                    if (p.SessionId == currentSessionId)
+                    {
+                        p.Kill();
+                        p.WaitForExit(1000);
+                    }
                 }
                 Thread.Sleep(300);
                 using (Process.Start("explorer.exe")) { }
@@ -1046,9 +1050,10 @@ namespace Win11FixGUI
             };
             using (Process p = Process.Start(psi))
             {
-                // 先等待进程退出，再读取输出，避免死锁
+                // 先读取输出，再等待进程退出，避免死锁
+                string output = p.StandardOutput.ReadToEnd();
                 p.WaitForExit();
-                return p.StandardOutput.ReadToEnd();
+                return output;
             }
         }
 
@@ -1127,19 +1132,7 @@ namespace Win11FixGUI
                 {
                     SetButtonsEnabled(false);
                     WriteLog("[>] 正在重启资源管理器...");
-
-                    int currentSessionId = Process.GetCurrentProcess().SessionId;
-                    foreach (Process p in Process.GetProcessesByName("explorer"))
-                    {
-                        if (p.SessionId == currentSessionId)
-                        {
-                            p.Kill();
-                            p.WaitForExit(1000);
-                        }
-                    }
-
-                    Thread.Sleep(1000);
-                    using (Process.Start("explorer.exe")) { }
+                    RestartExplorer();
                     WriteLog("[√] 资源管理器已重启");
                 }
                 catch (Exception ex)
