@@ -5,7 +5,7 @@ using System.Drawing;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
-using System.Management;          // 新增，用于获取完整密钥
+using System.Management;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Reflection;
@@ -30,6 +30,12 @@ namespace Win11FixGUI
 
         [DllImport("user32.dll", EntryPoint = "SystemParametersInfo", SetLastError = true)]
         public static extern bool SystemParametersInfo(uint action, uint param, IntPtr vparam, uint init);
+
+        [DllImport("user32.dll", EntryPoint = "SystemParametersInfo", SetLastError = true)]
+        public static extern bool SystemParametersInfo(uint action, uint param, ref bool vparam, uint init);
+
+        [DllImport("user32.dll", EntryPoint = "SystemParametersInfo", SetLastError = true)]
+        public static extern bool SystemParametersInfo(uint action, uint param, ref uint vparam, uint init);
 
         public static readonly IntPtr HWND_BROADCAST = (IntPtr)0xffff;
         public const int WM_SETTINGCHANGE = 0x001A;
@@ -61,6 +67,7 @@ namespace Win11FixGUI
         private Button btnTaskbarNeverCombine;
         private Button btnDesktopShowIcons;
         private Button btnDisableMousePrecision;
+        private Button btnAutoLock;
 
         private GroupBox grpActivation;
         private Button btnActivateOnline;
@@ -68,15 +75,22 @@ namespace Win11FixGUI
         private Button btnCheckActivation;
 
         private GroupBox grpTools;
-        private Button btnPutty;
+        private Button btnCPUZ;
+        private Button btnGPUZ;
+        private Button btnNotepadPP;
         private Button btnWinRAR;
+        private Button btnPutty;
+        private Button btnDismPP;
+        private Button btnCrystalDiskInfo;
         private Button btnDisableDefender;
+        private Button btnDisableDefenderV21;
         private Button btnDisableUpdate;
 
         private GroupBox grpSysAdmin;
         private Button btnControlPanel;
         private Button btnSecpol;
         private Button btnServices;
+        private Button btnRestartExplorer;
 
         private GroupBox grpNetwork;
         private Button btnNetworkInfo;
@@ -94,13 +108,41 @@ namespace Win11FixGUI
         private const int BTN_GAP = 8;
         private const int LEFT_MARGIN = 10;
 
+        private const string VERSION = "v1.0";
+
         private int _activeTasks = 0;
+
+        // ---------- 注册表/系统常量 ----------
+        private const string CLASSIC_MENU_KEY_PATH = @"Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32";
+        private const string MOUSE_REGISTRY_PATH = @"Control Panel\Mouse";
+        private const string BUILD_KEY_PATH = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+        private const string ACTIVATION_SCRIPT_URL = "https://get.activated.win";
+
+        // ---------- 缓存的字体对象（避免重复创建） ----------
+        private readonly Font _logTagFont;
+        private readonly Font _logContentFont;
+        private readonly Font _logMutedFont;
 
         public MainForm()
         {
+            _logTagFont = new Font("Consolas", 9F, FontStyle.Bold);
+            _logContentFont = new Font("Consolas", 9F, FontStyle.Regular);
+            _logMutedFont = new Font("Consolas", 9F, FontStyle.Regular);
+
             InitializeComponent();
             this.Shown += (sender, e) => InitializeSystemInfo();
             this.FormClosing += MainForm_FormClosing;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (_logTagFont != null) _logTagFont.Dispose();
+                if (_logContentFont != null) _logContentFont.Dispose();
+                if (_logMutedFont != null) _logMutedFont.Dispose();
+            }
+            base.Dispose(disposing);
         }
 
         // ---------- 初始化 UI 组件 ----------
@@ -118,27 +160,35 @@ namespace Win11FixGUI
             this.btnTaskbarNeverCombine = new Button();
             this.btnDesktopShowIcons = new Button();
             this.btnDisableMousePrecision = new Button();
+            this.btnAutoLock = new Button();
 
             this.btnActivateOnline = new Button();
             this.btnActivateLocal = new Button();
             this.btnCheckActivation = new Button();
 
-            this.btnPutty = new Button();
+            this.btnCPUZ = new Button();
+            this.btnGPUZ = new Button();
+            this.btnNotepadPP = new Button();
             this.btnWinRAR = new Button();
+            this.btnPutty = new Button();
+            this.btnDismPP = new Button();
+            this.btnCrystalDiskInfo = new Button();
             this.btnDisableDefender = new Button();
+            this.btnDisableDefenderV21 = new Button();
             this.btnDisableUpdate = new Button();
 
             this.btnControlPanel = new Button();
             this.btnSecpol = new Button();
             this.btnServices = new Button();
+            this.btnRestartExplorer = new Button();
 
             this.btnNetworkInfo = new Button();
             this.btnShowWifiPassword = new Button();
 
             this.SuspendLayout();
 
-            this.Text = "Windows 综合优化与维护工具";
-            this.Size = new Size(660, 520);
+            this.Text = "Windows 综合优化与维护工具 " + VERSION;
+            this.Size = new Size(660, 610);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedSingle;
             this.MaximizeBox = false;
@@ -157,18 +207,27 @@ namespace Win11FixGUI
             int groupWidth = 615;
             int groupHeight = 54;
 
-            // 系统设置
-            SetupGroupBox(grpSystemFix, "系统设置", 15, currentY, groupWidth, groupHeight);
+            // 系统设置（双行布局，新增自动锁屏）
+            int systemFixGroupHeight = 80;
+            SetupGroupBox(grpSystemFix, "系统设置", 15, currentY, groupWidth, systemFixGroupHeight);
             SetButtonProps(btnRestoreClassicMenu, "恢复经典右键", BtnRestoreClassicMenu_Click);
             SetButtonProps(btnTaskbarNeverCombine, "任务栏设置", BtnTaskbarNeverCombine_Click);
             SetButtonProps(btnDesktopShowIcons, "桌面图标设置", BtnDesktopShowIcons_Click);
             SetButtonProps(btnDisableMousePrecision, "关闭鼠标精准", BtnDisableMousePrecision_Click);
+            SetButtonProps(btnAutoLock, "自动锁屏", BtnAutoLock_Click);
             grpSystemFix.Controls.Add(btnRestoreClassicMenu);
             grpSystemFix.Controls.Add(btnTaskbarNeverCombine);
             grpSystemFix.Controls.Add(btnDesktopShowIcons);
             grpSystemFix.Controls.Add(btnDisableMousePrecision);
-            AlignButtonsLeft(grpSystemFix, btnRestoreClassicMenu, btnTaskbarNeverCombine, btnDesktopShowIcons, btnDisableMousePrecision);
-            currentY += 60;
+            grpSystemFix.Controls.Add(btnAutoLock);
+            // 第一行: 恢复经典右键, 任务栏设置, 桌面图标设置, 关闭鼠标精准
+            btnRestoreClassicMenu.Location = new Point(LEFT_MARGIN, 18);
+            btnTaskbarNeverCombine.Location = new Point(LEFT_MARGIN + (BTN_WIDTH + BTN_GAP), 18);
+            btnDesktopShowIcons.Location = new Point(LEFT_MARGIN + (BTN_WIDTH + BTN_GAP) * 2, 18);
+            btnDisableMousePrecision.Location = new Point(LEFT_MARGIN + (BTN_WIDTH + BTN_GAP) * 3, 18);
+            // 第二行: 自动锁屏
+            btnAutoLock.Location = new Point(LEFT_MARGIN, 18 + BTN_HEIGHT + 4);
+            currentY += systemFixGroupHeight + 6;
 
             // 系统激活
             SetupGroupBox(grpActivation, "系统激活", 15, currentY, groupWidth, groupHeight);
@@ -181,28 +240,59 @@ namespace Win11FixGUI
             AlignButtonsLeft(grpActivation, btnActivateOnline, btnActivateLocal, btnCheckActivation);
             currentY += 60;
 
-            // 工具
-            SetupGroupBox(grpTools, "工具", 15, currentY, groupWidth, groupHeight);
-            SetButtonProps(btnWinRAR, "运行 WinRAR", delegate { RunEmbeddedTool("winrar.exe"); });
-            SetButtonProps(btnPutty, "运行 PuTTY", delegate { RunEmbeddedTool("putty.exe"); });
-            SetButtonProps(btnDisableDefender, "关闭 Defender", delegate { RunEmbeddedTool("关闭windows Defender.zip"); });
+            // 工具（三行布局）
+            int toolsGroupHeight = 110;
+            SetupGroupBox(grpTools, "工具", 15, currentY, groupWidth, toolsGroupHeight);
+            SetButtonProps(btnCPUZ, "CPU-Z", delegate { RunEmbeddedTool("cpuz.exe"); });
+            SetButtonProps(btnGPUZ, "GPU-Z", delegate { RunEmbeddedTool("GPU-Z.exe"); });
+            SetButtonProps(btnNotepadPP, "Notepad++", delegate { RunEmbeddedTool("Notepad++.zip"); });
+            SetButtonProps(btnWinRAR, "WinRAR", delegate { RunEmbeddedTool("winrar.exe"); });
+            SetButtonProps(btnPutty, "PuTTY", delegate { RunEmbeddedTool("putty.exe"); });
+            SetButtonProps(btnDismPP, "Dism++", delegate { RunEmbeddedTool("Dism++.zip"); });
+            SetButtonProps(btnCrystalDiskInfo, "CrystalDiskInfo", delegate { RunEmbeddedTool("CrystalDiskInfo.zip"); });
+            SetButtonProps(btnDisableDefender, "Defender_v1.6", delegate { RunEmbeddedTool("关闭windows Defender.zip"); });
+            SetButtonProps(btnDisableDefenderV21, "Defender_v2.1", delegate { RunEmbeddedTool("关闭windows Defender_v2.1.zip"); });
             SetButtonProps(btnDisableUpdate, "关闭 Update", delegate { RunEmbeddedTool("关闭windows update.zip"); });
+            grpTools.Controls.Add(btnCPUZ);
+            grpTools.Controls.Add(btnGPUZ);
+            grpTools.Controls.Add(btnNotepadPP);
             grpTools.Controls.Add(btnWinRAR);
             grpTools.Controls.Add(btnPutty);
+            grpTools.Controls.Add(btnDismPP);
+            grpTools.Controls.Add(btnCrystalDiskInfo);
             grpTools.Controls.Add(btnDisableDefender);
+            grpTools.Controls.Add(btnDisableDefenderV21);
             grpTools.Controls.Add(btnDisableUpdate);
-            AlignButtonsLeft(grpTools, btnWinRAR, btnPutty, btnDisableDefender, btnDisableUpdate);
-            currentY += 60;
+            int rowStep = BTN_HEIGHT + 4;
+            int rowGap = BTN_WIDTH + BTN_GAP;
+            // 第一行: CPU-Z, GPU-Z, Notepad++, WinRAR
+            btnCPUZ.Location = new Point(LEFT_MARGIN, 18);
+            btnGPUZ.Location = new Point(LEFT_MARGIN + rowGap, 18);
+            btnNotepadPP.Location = new Point(LEFT_MARGIN + rowGap * 2, 18);
+            btnWinRAR.Location = new Point(LEFT_MARGIN + rowGap * 3, 18);
+            // 第二行: PuTTY, Dism++, CrystalDiskInfo
+            int row2Y = 18 + rowStep;
+            btnPutty.Location = new Point(LEFT_MARGIN, row2Y);
+            btnDismPP.Location = new Point(LEFT_MARGIN + rowGap, row2Y);
+            btnCrystalDiskInfo.Location = new Point(LEFT_MARGIN + rowGap * 2, row2Y);
+            // 第三行: Defender_v1.6, Defender_v2.1, 关闭 Update
+            int row3Y = 18 + rowStep * 2;
+            btnDisableDefender.Location = new Point(LEFT_MARGIN, row3Y);
+            btnDisableDefenderV21.Location = new Point(LEFT_MARGIN + rowGap, row3Y);
+            btnDisableUpdate.Location = new Point(LEFT_MARGIN + rowGap * 2, row3Y);
+            currentY += toolsGroupHeight + 6;
 
             // 系统管理组件
             SetupGroupBox(grpSysAdmin, "系统管理组件", 15, currentY, groupWidth, groupHeight);
             SetButtonProps(btnControlPanel, "控制面板", BtnControlPanel_Click);
             SetButtonProps(btnServices, "系统服务", BtnServices_Click);
             SetButtonProps(btnSecpol, "本地安全策略", BtnSecpol_Click);
+            SetButtonProps(btnRestartExplorer, "重启Explorer", BtnRestartExplorer_Click);
             grpSysAdmin.Controls.Add(btnControlPanel);
             grpSysAdmin.Controls.Add(btnServices);
             grpSysAdmin.Controls.Add(btnSecpol);
-            AlignButtonsLeft(grpSysAdmin, btnControlPanel, btnServices, btnSecpol);
+            grpSysAdmin.Controls.Add(btnRestartExplorer);
+            AlignButtonsLeft(grpSysAdmin, btnControlPanel, btnServices, btnSecpol, btnRestartExplorer);
             currentY += 60;
 
             // 网络查看
@@ -265,15 +355,10 @@ namespace Win11FixGUI
             isClassicMenuEnabled = CheckClassicMenuEnabled();
 
             WriteLog("==========================================================");
-            WriteLog(string.Format(" 操作系统: {0} (Build {1}) | 管理员: {2}", systemVersion, buildNumber, IsAdmin() ? "Yes" : "No"));
+            WriteLog(string.Format(" 操作系统: {0} (Build {1})", systemVersion, buildNumber));
+            WriteLog(string.Format(" 管理员权限: {0}", IsAdmin() ? "Yes" : "No"));
+            WriteLog(string.Format(" 版本: {0}", VERSION));
             WriteLog("==========================================================");
-
-            if (!isWin11)
-                WriteLog("[提示] 当前系统非 Win11，部分专属修复功能已自动禁用/优化。");
-            else if (isClassicMenuEnabled)
-                WriteLog("[提示] Win11 经典右键菜单已处于启用状态。");
-            else
-                WriteLog("[提示] 检测到 Windows 11 环境，经典右键菜单尚未启用。");
 
             UpdateUI();
         }
@@ -282,7 +367,7 @@ namespace Win11FixGUI
         {
             try
             {
-                using (RegistryKey key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
+                using (RegistryKey key = Registry.LocalMachine.OpenSubKey(BUILD_KEY_PATH))
                 {
                     if (key != null)
                     {
@@ -323,8 +408,7 @@ namespace Win11FixGUI
         {
             try
             {
-                const string keyPath = @"Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32";
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(keyPath))
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(CLASSIC_MENU_KEY_PATH))
                 {
                     return key != null;
                 }
@@ -332,7 +416,7 @@ namespace Win11FixGUI
             catch { return false; }
         }
 
-        // ---------- 日志方法（重命名以避免与 System.Diagnostics.Log 冲突） ----------
+        // ---------- 日志方法 ----------
         private void WriteLog(string text)
         {
             if (this.IsDisposed || !this.IsHandleCreated) return;
@@ -343,46 +427,51 @@ namespace Win11FixGUI
                 return;
             }
 
-            text = text.TrimStart('\r', '\n');
-
-            int closeBracket = text.IndexOf(']');
-            if (text.StartsWith("[") && closeBracket > 0)
+            try
             {
-                string tag = text.Substring(0, closeBracket + 1);
-                string content = text.Substring(closeBracket + 1);
+                text = text.TrimStart('\r', '\n');
 
-                Color tagColor = Color.FromArgb(100, 181, 246);
-                if (tag.Contains("错误")) tagColor = Color.FromArgb(255, 99, 99);
-                else if (tag.Contains("成功")) tagColor = Color.FromArgb(87, 219, 131);
-                else if (tag.Contains("警告")) tagColor = Color.FromArgb(255, 193, 7);
-                else if (tag.Contains("状态")) tagColor = Color.FromArgb(0, 230, 255);
-                else if (tag.Contains("密钥")) tagColor = Color.FromArgb(255, 180, 50);
-                else if (tag.Contains("过期")) tagColor = Color.FromArgb(255, 150, 150);
-                else if (tag.Contains("提示") || tag.Contains("操作") || tag.Contains("解压") || tag.Contains("清理"))
-                    tagColor = Color.FromArgb(100, 181, 246);
+                int closeBracket = text.IndexOf(']');
+                if (text.StartsWith("[") && closeBracket > 0)
+                {
+                    string tag = text.Substring(0, closeBracket + 1);
+                    string content = text.Substring(closeBracket + 1);
 
-                this.txtLog.SelectionStart = this.txtLog.TextLength;
-                this.txtLog.SelectionLength = 0;
-                this.txtLog.SelectionColor = tagColor;
-                this.txtLog.SelectionFont = new Font(this.txtLog.Font, FontStyle.Bold);
-                this.txtLog.AppendText(tag);
+                    Color tagColor = Color.FromArgb(100, 181, 246); // 默认蓝色
+                    if (tag.Length >= 2)
+                    {
+                        if (tag[1] == '×') tagColor = Color.FromArgb(255, 99, 99);
+                        else if (tag[1] == '√') tagColor = Color.FromArgb(87, 219, 131);
+                        else if (tag[1] == '!') tagColor = Color.FromArgb(255, 193, 7);
+                    }
 
-                this.txtLog.SelectionStart = this.txtLog.TextLength;
-                this.txtLog.SelectionLength = 0;
-                this.txtLog.SelectionColor = Color.FromArgb(230, 235, 240);
-                this.txtLog.SelectionFont = new Font(this.txtLog.Font, FontStyle.Regular);
-                this.txtLog.AppendText(content + "\n");
+                    this.txtLog.SelectionStart = this.txtLog.TextLength;
+                    this.txtLog.SelectionLength = 0;
+                    this.txtLog.SelectionColor = tagColor;
+                    this.txtLog.SelectionFont = _logTagFont;
+                    this.txtLog.AppendText(tag);
+
+                    this.txtLog.SelectionStart = this.txtLog.TextLength;
+                    this.txtLog.SelectionLength = 0;
+                    this.txtLog.SelectionColor = Color.FromArgb(230, 235, 240);
+                    this.txtLog.SelectionFont = _logContentFont;
+                    this.txtLog.AppendText(content + "\n");
+                }
+                else
+                {
+                    this.txtLog.SelectionStart = this.txtLog.TextLength;
+                    this.txtLog.SelectionLength = 0;
+                    this.txtLog.SelectionColor = Color.FromArgb(200, 205, 210);
+                    this.txtLog.SelectionFont = _logMutedFont;
+                    this.txtLog.AppendText(text + "\n");
+                }
+
+                this.txtLog.ScrollToCaret();
             }
-            else
+            catch (ObjectDisposedException)
             {
-                this.txtLog.SelectionStart = this.txtLog.TextLength;
-                this.txtLog.SelectionLength = 0;
-                this.txtLog.SelectionColor = Color.FromArgb(200, 205, 210);
-                this.txtLog.SelectionFont = new Font(this.txtLog.Font, FontStyle.Regular);
-                this.txtLog.AppendText(text + "\n");
+                // 窗体已释放，忽略日志写入
             }
-
-            this.txtLog.ScrollToCaret();
         }
 
         // ---------- 按钮启用控制 ----------
@@ -396,30 +485,37 @@ namespace Win11FixGUI
                 return;
             }
 
-            Action<Control.ControlCollection> toggleButtons = null;
-            toggleButtons = (controls) =>
+            try
             {
-                foreach (Control c in controls)
+                Action<Control.ControlCollection> toggleButtons = null;
+                toggleButtons = (controls) =>
                 {
-                    Button btn = c as Button;
-                    if (btn != null)
+                    foreach (Control c in controls)
                     {
-                        if (btn == btnRestoreClassicMenu && (!isWin11 || isClassicMenuEnabled))
+                        Button btn = c as Button;
+                        if (btn != null)
                         {
-                            btn.Enabled = false;
-                            btn.Cursor = Cursors.Default;
-                            continue;
+                            if (btn == btnRestoreClassicMenu && (!isWin11 || isClassicMenuEnabled))
+                            {
+                                btn.Enabled = false;
+                                btn.Cursor = Cursors.Default;
+                                continue;
+                            }
+
+                            btn.Enabled = enabled;
+                            btn.Cursor = enabled ? Cursors.Hand : Cursors.Default;
                         }
-
-                        btn.Enabled = enabled;
-                        btn.Cursor = enabled ? Cursors.Hand : Cursors.Default;
+                        if (c.HasChildren)
+                            toggleButtons(c.Controls);
                     }
-                    if (c.HasChildren)
-                        toggleButtons(c.Controls);
-                }
-            };
+                };
 
-            toggleButtons(this.Controls);
+                toggleButtons(this.Controls);
+            }
+            catch (ObjectDisposedException)
+            {
+                // 窗体已释放，忽略
+            }
         }
 
         private void UpdateUI()
@@ -432,10 +528,38 @@ namespace Win11FixGUI
                 return;
             }
 
-            if (!isWin11 || isClassicMenuEnabled)
+            try
             {
-                this.btnRestoreClassicMenu.Enabled = false;
-                this.btnRestoreClassicMenu.Cursor = Cursors.Default;
+                if (!isWin11 || isClassicMenuEnabled)
+                {
+                    this.btnRestoreClassicMenu.Enabled = false;
+                    this.btnRestoreClassicMenu.Cursor = Cursors.Default;
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                // 窗体已释放，忽略
+            }
+        }
+
+        // ---------- 通用系统命令执行方法 ----------
+        /// <summary>
+        /// 启动一个系统命令（如 .msc、.cpl 等），自动处理日志和异常。
+        /// </summary>
+        private void RunSystemCommand(string command, string arguments, string actionDescription, string successMessage, string errorMessage)
+        {
+            try
+            {
+                WriteLog(string.Format("[>] 正在{0}...", actionDescription));
+                using (Process.Start(new ProcessStartInfo(command, arguments) { UseShellExecute = true }))
+                {
+                    // 释放 Process 对象，子进程继续运行
+                }
+                WriteLog(string.Format("[√] {0}", successMessage));
+            }
+            catch (Exception ex)
+            {
+                WriteLog(string.Format("[×] {0}: {1}", errorMessage, ex.Message));
             }
         }
 
@@ -445,22 +569,22 @@ namespace Win11FixGUI
             Task.Run(() =>
             {
                 Interlocked.Increment(ref _activeTasks);
-                SetButtonsEnabled(false);
-
                 try
                 {
+                    SetButtonsEnabled(false);
+
                     string tempRoot = Path.Combine(Application.StartupPath, "temp");
                     string targetDir = Path.Combine(tempRoot, Guid.NewGuid().ToString("N"));
                     Directory.CreateDirectory(targetDir);
 
                     string targetFilePath = Path.Combine(targetDir, fileName);
 
-                    WriteLog(string.Format("[操作] 正在释放工具组件: {0} 到 {1}...", fileName, targetDir));
+                    WriteLog(string.Format("[>] 正在释放工具组件: {0} 到 {1}...", fileName, targetDir));
 
                     bool extracted = TryExtractResource(fileName, targetFilePath);
                     if (!extracted)
                     {
-                        WriteLog(string.Format("[错误] 找不到资源文件: {0}", fileName));
+                        WriteLog(string.Format("[×] 找不到资源文件: {0}", fileName));
                         return;
                     }
 
@@ -468,11 +592,11 @@ namespace Win11FixGUI
 
                     if (isZip)
                     {
-                        WriteLog(string.Format("[解压] 正在解压至: {0}...", targetDir));
+                        WriteLog(string.Format("[>] 正在解压至: {0}...", targetDir));
                         ZipFile.ExtractToDirectory(targetFilePath, targetDir);
                         File.Delete(targetFilePath);
-                        WriteLog(string.Format("[成功] 已解压至: {0}", targetDir));
-                        Process.Start("explorer.exe", targetDir);
+                        WriteLog(string.Format("[√] 已解压至: {0}", targetDir));
+                        using (Process.Start("explorer.exe", targetDir)) { }
                     }
                     else if (fileName.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase) ||
                              fileName.EndsWith(".bat", StringComparison.OrdinalIgnoreCase))
@@ -487,7 +611,7 @@ namespace Win11FixGUI
                         using (Process p = Process.Start(psi))
                         {
                             if (p != null)
-                                WriteLog(string.Format("[成功] 已启动脚本: {0} (PID: {1})", fileName, p.Id));
+                                WriteLog(string.Format("[√] 已启动脚本: {0} (PID: {1})", fileName, p.Id));
                         }
                     }
                     else
@@ -501,13 +625,13 @@ namespace Win11FixGUI
                         using (Process p = Process.Start(psi))
                         {
                             if (p != null)
-                                WriteLog(string.Format("[成功] 已启动程序: {0} (PID: {1})", fileName, p.Id));
+                                WriteLog(string.Format("[√] 已启动程序: {0} (PID: {1})", fileName, p.Id));
                         }
                     }
                 }
                 catch (Exception ex)
                 {
-                    WriteLog(string.Format("[错误] 执行失败: {0}", ex.Message));
+                    WriteLog(string.Format("[×] 执行失败: {0}", ex.Message));
                 }
                 finally
                 {
@@ -557,13 +681,13 @@ namespace Win11FixGUI
         {
             if (!isWin11)
             {
-                WriteLog("[提示] Win7/Win10 默认已是经典右键菜单，无需修复。");
+                WriteLog("[>] Win7/Win10 默认已是经典右键菜单，无需修复。");
                 return;
             }
 
             if (isClassicMenuEnabled)
             {
-                WriteLog("[提示] 经典右键菜单已启用，无需重复操作。");
+                WriteLog("[>] 经典右键菜单已启用，无需重复操作。");
                 return;
             }
 
@@ -572,9 +696,8 @@ namespace Win11FixGUI
 
             try
             {
-                WriteLog("[操作] 正在还原经典右键菜单...");
-                const string keyPath = @"Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32";
-                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(keyPath))
+                WriteLog("[>] 正在还原经典右键菜单...");
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(CLASSIC_MENU_KEY_PATH))
                 {
                     if (key != null) key.SetValue("", "");
                 }
@@ -584,11 +707,11 @@ namespace Win11FixGUI
 
                 isClassicMenuEnabled = true;
                 UpdateUI();
-                WriteLog("[成功] 经典右键菜单恢复成功！");
+                WriteLog("[√] 经典右键菜单恢复成功！");
             }
             catch (Exception ex)
             {
-                WriteLog("[错误] 修改注册表失败: " + ex.Message);
+                WriteLog("[×] 修改注册表失败: " + ex.Message);
             }
         }
 
@@ -597,9 +720,9 @@ namespace Win11FixGUI
             IntPtr pointer = IntPtr.Zero;
             try
             {
-                WriteLog("[操作] 正在关闭鼠标精准定位 (禁用鼠标加速)...");
+                WriteLog("[>] 正在关闭鼠标精准定位 (禁用鼠标加速)...");
 
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Control Panel\Mouse", true))
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(MOUSE_REGISTRY_PATH, true))
                 {
                     if (key != null)
                     {
@@ -621,18 +744,212 @@ namespace Win11FixGUI
                 );
 
                 if (success)
-                    WriteLog("[成功] 鼠标精准定位已成功关闭并即时生效！");
+                    WriteLog("[√] 鼠标精准定位已成功关闭并即时生效！");
                 else
-                    WriteLog("[警告] 注册表已修改，但发送系统刷新指令时出现异常，重启后生效。");
+                    WriteLog("[!] 注册表已修改，但发送系统刷新指令时出现异常，重启后生效。");
             }
             catch (Exception ex)
             {
-                WriteLog("[错误] 关闭鼠标精准失败: " + ex.Message);
+                WriteLog("[×] 关闭鼠标精准失败: " + ex.Message);
             }
             finally
             {
                 if (pointer != IntPtr.Zero)
                     Marshal.FreeHGlobal(pointer);
+            }
+        }
+
+        private void BtnAutoLock_Click(object sender, EventArgs e)
+        {
+            if (!IsAdmin())
+            {
+                WriteLog("[×] 此功能需要管理员权限，请以管理员身份运行本程序。");
+                return;
+            }
+
+            int seconds = ShowInputDialog("请输入息屏自动锁定的等待时间（秒）：", "息屏时间设置");
+            if (seconds <= 0) return;
+
+            try
+            {
+                WriteLog("[>] 正在配置息屏自动锁定...");
+
+                // [1/6] 设置用户注册表 (HKCU)
+                WriteLog("[>] [1/6] 设置用户注册表...");
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop", true))
+                {
+                    if (key != null)
+                    {
+                        key.SetValue("ScreenSaveActive", "1", RegistryValueKind.String);
+                        key.SetValue("ScreenSaverIsSecure", "1", RegistryValueKind.String);
+                        key.SetValue("ScreenSaveTimeOut", seconds.ToString(), RegistryValueKind.String);
+                        key.SetValue("SCRNSAVE.EXE", "scrnsave.scr", RegistryValueKind.String);
+                        WriteLog("[√] HKCU 注册表已设置");
+                    }
+                    else
+                    {
+                        WriteLog("[×] 无法打开 HKCU Control Panel\\Desktop");
+                        return;
+                    }
+                }
+
+                // [2/6] 设置计算机策略注册表 (HKLM)
+                WriteLog("[>] [2/6] 设置计算机策略注册表...");
+                using (RegistryKey key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Policies\Microsoft\Windows\Control Panel\Desktop", true))
+                {
+                    if (key != null)
+                    {
+                        key.SetValue("ScreenSaveActive", "1", RegistryValueKind.String);
+                        key.SetValue("ScreenSaverIsSecure", "1", RegistryValueKind.String);
+                        key.SetValue("ScreenSaveTimeOut", seconds.ToString(), RegistryValueKind.String);
+                        WriteLog("[√] HKLM 策略注册表已设置");
+                    }
+                    else
+                    {
+                        WriteLog("[!] 无法打开 HKLM 策略注册表项，尝试创建...");
+                        using (RegistryKey newKey = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Policies\Microsoft\Windows\Control Panel\Desktop"))
+                        {
+                            if (newKey != null)
+                            {
+                                newKey.SetValue("ScreenSaveActive", "1", RegistryValueKind.String);
+                                newKey.SetValue("ScreenSaverIsSecure", "1", RegistryValueKind.String);
+                                newKey.SetValue("ScreenSaveTimeOut", seconds.ToString(), RegistryValueKind.String);
+                                WriteLog("[√] HKLM 策略注册表已创建并设置");
+                            }
+                        }
+                    }
+                }
+
+                // [3/6] 设置系统安全策略
+                WriteLog("[>] [3/6] 设置系统安全策略...");
+                using (RegistryKey key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", true))
+                {
+                    if (key != null)
+                    {
+                        key.SetValue("InactivityTimeoutSecs", seconds, RegistryValueKind.DWord);
+                        WriteLog("[√] 系统安全策略已设置");
+                    }
+                    else
+                    {
+                        WriteLog("[!] 无法打开系统安全策略注册表项");
+                    }
+                }
+
+                // [4/6] 刷新组策略
+                WriteLog("[>] [4/6] 刷新组策略...");
+                try
+                {
+                    using (Process p = Process.Start(new ProcessStartInfo("gpupdate", "/force")
+                    {
+                        CreateNoWindow = true,
+                        UseShellExecute = false
+                    }))
+                    {
+                        if (p != null) p.WaitForExit();
+                        WriteLog("[√] 组策略已刷新");
+                    }
+                }
+                catch
+                {
+                    WriteLog("[!] 刷新组策略失败");
+                }
+
+                // [5/6] 设置电源选项
+                WriteLog("[>] [5/6] 设置电源选项...");
+                try
+                {
+                    int monitorMinutes = Math.Max(1, seconds / 60);
+                    RunPowerCfg(string.Format("-change -monitor-timeout-ac {0}", monitorMinutes));
+                    RunPowerCfg(string.Format("-change -monitor-timeout-dc {0}", monitorMinutes));
+                    RunPowerCfg("-setacvalueindex SCHEME_CURRENT sub_none CONSOLELOCK 1");
+                    RunPowerCfg("-setactive SCHEME_CURRENT");
+                    WriteLog(string.Format("[√] 电源选项已设置（屏幕 {0} 分钟关闭）", monitorMinutes));
+                }
+                catch (Exception ex)
+                {
+                    WriteLog("[!] 设置电源选项时出错: " + ex.Message);
+                }
+
+                // [6/6] 通过 SystemParametersInfo 通知系统
+                WriteLog("[>] [6/6] 通知系统刷新设置...");
+                bool enable = true;
+                NativeMethods.SystemParametersInfo(0x0011, 1, ref enable, 0x0002);
+                uint timeout = (uint)seconds;
+                NativeMethods.SystemParametersInfo(0x0015, timeout, ref timeout, 0x0002);
+
+                WriteLog("==========================================================");
+                WriteLog(string.Format("[√] 息屏自动锁定配置完成！{0} 秒无操作后自动锁屏。", seconds));
+                WriteLog("[>] 建议注销或重启计算机使设置完全生效。");
+                WriteLog("==========================================================");
+            }
+            catch (Exception ex)
+            {
+                WriteLog("[×] 配置息屏自动锁定失败: " + ex.Message);
+            }
+        }
+
+        private void RunPowerCfg(string arguments)
+        {
+            using (Process p = Process.Start(new ProcessStartInfo("powercfg", arguments)
+            {
+                CreateNoWindow = true,
+                UseShellExecute = false
+            }))
+            {
+                if (p != null) p.WaitForExit();
+            }
+        }
+
+        private int ShowInputDialog(string prompt, string title)
+        {
+            using (Form form = new Form())
+            {
+                Label label = new Label();
+                TextBox textBox = new TextBox();
+                Button buttonOk = new Button();
+                Button buttonCancel = new Button();
+
+                form.Text = title;
+                form.StartPosition = FormStartPosition.CenterParent;
+                form.FormBorderStyle = FormBorderStyle.FixedDialog;
+                form.MaximizeBox = false;
+                form.MinimizeBox = false;
+                form.ClientSize = new Size(320, 130);
+
+                label.Text = prompt;
+                label.Location = new Point(12, 12);
+                label.AutoSize = true;
+
+                textBox.Text = "60";
+                textBox.Location = new Point(12, 36);
+                textBox.Size = new Size(280, 23);
+
+                buttonOk.Text = "确定";
+                buttonOk.Location = new Point(135, 68);
+                buttonOk.Size = new Size(75, 25);
+                buttonOk.DialogResult = DialogResult.OK;
+
+                buttonCancel.Text = "取消";
+                buttonCancel.Location = new Point(220, 68);
+                buttonCancel.Size = new Size(75, 25);
+                buttonCancel.DialogResult = DialogResult.Cancel;
+
+                form.Controls.Add(label);
+                form.Controls.Add(textBox);
+                form.Controls.Add(buttonOk);
+                form.Controls.Add(buttonCancel);
+                form.AcceptButton = buttonOk;
+                form.CancelButton = buttonCancel;
+
+                if (form.ShowDialog(this) == DialogResult.OK)
+                {
+                    int val;
+                    if (int.TryParse(textBox.Text, out val) && val > 0)
+                        return val;
+                    MessageBox.Show("请输入大于 0 的有效秒数。", "输入错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return -1;
+                }
+                return -1;
             }
         }
 
@@ -646,11 +963,11 @@ namespace Win11FixGUI
                     p.WaitForExit(1000);
                 }
                 Thread.Sleep(300);
-                Process.Start("explorer.exe");
+                using (Process.Start("explorer.exe")) { }
             }
             catch (Exception ex)
             {
-                WriteLog("[警告] 重启资源管理器失败: " + ex.Message);
+                WriteLog("[!] 重启资源管理器失败: " + ex.Message);
             }
         }
 
@@ -658,20 +975,20 @@ namespace Win11FixGUI
         {
             try
             {
-                WriteLog("[操作] 正在请求在线激活服务...");
-                string script = "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://get.activated.win | iex";
+                WriteLog("[>] 正在请求在线激活服务...");
+                string script = string.Format("[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm {0} | iex", ACTIVATION_SCRIPT_URL);
 
                 ProcessStartInfo psi = new ProcessStartInfo("powershell.exe", string.Format("-NoExit -Command \"{0}\"", script))
                 {
                     UseShellExecute = false,
                     CreateNoWindow = false
                 };
-                Process.Start(psi);
-                WriteLog("[成功] 已调起在线激活 PowerShell 脚本。");
+                using (Process.Start(psi)) { }
+                WriteLog("[√] 已调起在线激活 PowerShell 脚本。");
             }
             catch (Exception ex)
             {
-                WriteLog("[错误] 启动激活脚本失败: " + ex.Message);
+                WriteLog("[×] 启动激活脚本失败: " + ex.Message);
             }
         }
 
@@ -680,38 +997,31 @@ namespace Win11FixGUI
             RunEmbeddedTool("MAS.cmd");
         }
 
-        // ---------- 新增：查询激活状态 ----------
+        // ---------- 查询激活状态 ----------
         private void BtnCheckActivation_Click(object sender, EventArgs e)
         {
             Task.Run(() =>
             {
                 Interlocked.Increment(ref _activeTasks);
-                SetButtonsEnabled(false);
-
                 try
                 {
-                    WriteLog("[操作] 正在查询 Windows 激活状态...");
+                    SetButtonsEnabled(false);
+
                     string systemDir = Environment.GetFolderPath(Environment.SpecialFolder.System);
                     string slmgrPath = Path.Combine(systemDir, "slmgr.vbs");
                     if (!File.Exists(slmgrPath))
                     {
-                        WriteLog("[错误] 找不到 slmgr.vbs，请检查系统完整性。");
+                        WriteLog("[×] 找不到 slmgr.vbs，请检查系统完整性。");
                         return;
                     }
 
-                    string dliOutput = RunSlmgr(slmgrPath, "/dli");
-                    WriteLog("--- 许可证详细信息 ---");
-                    ParseLicenseStatus(dliOutput);
-
-                    string xprOutput = RunSlmgr(slmgrPath, "/xpr");
-                    WriteLog("--- 激活过期信息 ---");
-                    ParseExpiryInfo(xprOutput);
-
-                    WriteLog("[成功] 激活状态查询完成。");
+                    string output = RunSlmgr(slmgrPath, "/xpr");
+                    foreach (string line in output.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
+                        WriteLog(line);
                 }
                 catch (Exception ex)
                 {
-                    WriteLog(string.Format("[错误] 查询激活状态失败: {0}", ex.Message));
+                    WriteLog(string.Format("[×] 查询激活状态失败: {0}", ex.Message));
                 }
                 finally
                 {
@@ -736,127 +1046,10 @@ namespace Win11FixGUI
             };
             using (Process p = Process.Start(psi))
             {
-                string output = p.StandardOutput.ReadToEnd();
+                // 先等待进程退出，再读取输出，避免死锁
                 p.WaitForExit();
-                return output;
+                return p.StandardOutput.ReadToEnd();
             }
-        }
-
-        // 获取完整产品密钥（新增）
-        private string GetFullProductKey()
-        {
-            try
-            {
-                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
-                    "SELECT OA3xOriginalProductKey FROM SoftwareLicensingProduct WHERE PartialProductKey IS NOT NULL"))
-                {
-                    foreach (ManagementObject obj in searcher.Get())
-                    {
-                        object key = obj["OA3xOriginalProductKey"];
-                        if (key != null && !string.IsNullOrEmpty(key.ToString()))
-                            return key.ToString();
-                    }
-                }
-            }
-            catch { }
-            return null;
-        }
-
-        private void ParseLicenseStatus(string output)
-        {
-            string status = "未知";
-            string keySuffix = "未知";
-
-            foreach (string line in output.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
-            {
-                string trimmed = line.Trim();
-                if (trimmed.Contains("许可证状态") || trimmed.Contains("License Status"))
-                {
-                    int idx = trimmed.IndexOf(':');
-                    if (idx >= 0 && idx < trimmed.Length - 1)
-                        status = trimmed.Substring(idx + 1).Trim();
-                }
-                else if (trimmed.Contains("部分产品密钥") || trimmed.Contains("Partial Product Key"))
-                {
-                    int idx = trimmed.IndexOf(':');
-                    if (idx >= 0 && idx < trimmed.Length - 1)
-                        keySuffix = trimmed.Substring(idx + 1).Trim();
-                }
-            }
-
-            // 备用判断
-            if (status == "未知")
-            {
-                if (output.Contains("已授权") || output.Contains("Licensed"))
-                    status = "已授权 (Licensed)";
-                else if (output.Contains("通知") || output.Contains("Notification"))
-                    status = "通知模式 (Notification)";
-                else if (output.Contains("未授权") || output.Contains("Unlicensed"))
-                    status = "未授权 (Unlicensed)";
-            }
-
-            WriteLog(string.Format("[状态] 许可证状态: {0}", status));
-            WriteLog(string.Format("[密钥] 产品密钥后五位: {0}", keySuffix));
-
-            // 尝试获取完整密钥
-            string fullKey = GetFullProductKey();
-            if (!string.IsNullOrEmpty(fullKey))
-            {
-                WriteLog(string.Format("[密钥] 完整产品密钥: {0}", fullKey));
-                WriteLog("[提示] 完整密钥已显示，请注意保护隐私。");
-            }
-            else
-            {
-                WriteLog("[提示] 无法获取完整密钥（非 OEM 激活或系统限制），仅显示后五位。");
-            }
-
-            if (status.Contains("已授权") || status.Contains("Licensed"))
-                WriteLog("[成功] 系统已永久激活或有效授权。");
-            else if (status.Contains("通知") || status.Contains("Notification"))
-                WriteLog("[警告] 系统处于通知模式，可能即将过期。");
-            else if (status.Contains("未授权") || status.Contains("Unlicensed"))
-                WriteLog("[错误] 系统未授权，请激活。");
-        }
-
-        private void ParseExpiryInfo(string output)
-        {
-            string expiry = "未知";
-
-            foreach (string line in output.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
-            {
-                string trimmed = line.Trim();
-                if (trimmed.Contains("剩余") || trimmed.Contains("剩余天") || trimmed.Contains("days remaining"))
-                {
-                    var match = Regex.Match(trimmed, @"(\d+)\s*天|(\d+)\s*days");
-                    if (match.Success)
-                    {
-                        string days = match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value;
-                        expiry = string.Format("剩余 {0} 天", days);
-                        break;
-                    }
-                }
-                else if (trimmed.Contains("永久激活") || trimmed.Contains("permanently activated"))
-                {
-                    expiry = "永久激活 (无过期限制)";
-                    break;
-                }
-                else if (trimmed.Contains("KMS") && !trimmed.Contains("not"))
-                {
-                    expiry = "KMS 激活 (需定期续期)";
-                }
-            }
-
-            if (expiry == "未知")
-            {
-                if (output.Contains("永久") || output.Contains("permanent") || output.Contains("永久激活"))
-                    expiry = "永久激活 (无过期限制)";
-                else if (output.Contains("EnterpriseS") || output.Contains("LTSC"))
-                    expiry = "永久激活 (长期服务版)";
-                else
-                    expiry = "未获取到过期信息 (可能为永久激活)";
-            }
-
-            WriteLog(string.Format("[过期] {0}", expiry));
         }
 
         // ---------- 其他已有功能 ----------
@@ -864,88 +1057,102 @@ namespace Win11FixGUI
         {
             try
             {
-                WriteLog("[操作] 正在调起系统设置页面...");
+                WriteLog("[>] 正在调起系统设置页面...");
                 if (buildNumber < 10240)
-                    Process.Start(new ProcessStartInfo("rundll32.exe", "shell32.dll,Options_RunDLL 1") { UseShellExecute = true });
+                {
+                    using (Process.Start(new ProcessStartInfo("rundll32.exe", "shell32.dll,Options_RunDLL 1") { UseShellExecute = true })) { }
+                }
                 else
-                    Process.Start(new ProcessStartInfo("ms-settings:taskbar") { UseShellExecute = true });
-                WriteLog("[成功] 已调起系统任务栏设置。");
+                {
+                    using (Process.Start(new ProcessStartInfo("ms-settings:taskbar") { UseShellExecute = true })) { }
+                }
+                WriteLog("[√] 已调起系统任务栏设置。");
             }
             catch (Exception ex)
             {
-                WriteLog("[错误] 打开失败: " + ex.Message);
+                WriteLog("[×] 打开失败: " + ex.Message);
             }
         }
 
         private void BtnDesktopShowIcons_Click(object sender, EventArgs e)
         {
-            try
-            {
-                WriteLog("[操作] 正在调起桌面图标设置...");
-                Process.Start(new ProcessStartInfo("control", "desk.cpl,,@0,3") { UseShellExecute = true });
-                WriteLog("[成功] 已打开桌面图标设置界面。");
-            }
-            catch (Exception ex)
-            {
-                WriteLog("[错误] 打开失败: " + ex.Message);
-            }
+            RunSystemCommand("control", "desk.cpl,,@0,3", "调起桌面图标设置", "已打开桌面图标设置界面。", "打开失败");
         }
 
         private void BtnControlPanel_Click(object sender, EventArgs e)
         {
             try
             {
-                WriteLog("[操作] 正在调起控制面板...");
+                WriteLog("[>] 正在调起控制面板...");
                 ProcessStartInfo psi = new ProcessStartInfo
                 {
                     FileName = "explorer.exe",
                     Arguments = "shell:::{21EC2020-3AEA-1069-A2DD-08002B30309D}",
                     UseShellExecute = true
                 };
-                Process.Start(psi);
-                WriteLog("[成功] 已打开控制面板（所有控制面板项）。");
+                using (Process.Start(psi)) { }
+                WriteLog("[√] 已打开控制面板（所有控制面板项）。");
             }
             catch (Exception ex)
             {
-                WriteLog("[错误] Shell方式调起失败: " + ex.Message);
+                WriteLog("[×] Shell方式调起失败: " + ex.Message);
                 try
                 {
-                    Process.Start(new ProcessStartInfo("control.exe") { UseShellExecute = true });
-                    WriteLog("[成功] 通过备用指令打开控制面板。");
+                    using (Process.Start(new ProcessStartInfo("control.exe") { UseShellExecute = true })) { }
+                    WriteLog("[√] 通过备用指令打开控制面板。");
                 }
                 catch (Exception innerEx)
                 {
-                    WriteLog("[错误] 备用方案启动失败: " + innerEx.Message);
+                    WriteLog("[×] 备用方案启动失败: " + innerEx.Message);
                 }
             }
         }
 
         private void BtnSecpol_Click(object sender, EventArgs e)
         {
-            try
-            {
-                WriteLog("[操作] 正在打开本地安全策略...");
-                Process.Start(new ProcessStartInfo("secpol.msc") { UseShellExecute = true });
-                WriteLog("[成功] 已打开本地安全策略。");
-            }
-            catch (Exception ex)
-            {
-                WriteLog("[错误] 打开本地安全策略失败: " + ex.Message + " (注: 家庭版系统无此策略组件)");
-            }
+            RunSystemCommand("secpol.msc", "", "打开本地安全策略", "已打开本地安全策略。", "打开本地安全策略失败 (注: 家庭版系统无此策略组件)");
         }
 
         private void BtnServices_Click(object sender, EventArgs e)
         {
-            try
+            RunSystemCommand("services.msc", "", "打开系统服务管理", "已打开系统服务管理。", "打开系统服务失败");
+        }
+
+        private void BtnRestartExplorer_Click(object sender, EventArgs e)
+        {
+            Task.Run(() =>
             {
-                WriteLog("[操作] 正在打开系统服务管理...");
-                Process.Start(new ProcessStartInfo("services.msc") { UseShellExecute = true });
-                WriteLog("[成功] 已打开系统服务管理。");
-            }
-            catch (Exception ex)
-            {
-                WriteLog("[错误] 打开系统服务失败: " + ex.Message);
-            }
+                Interlocked.Increment(ref _activeTasks);
+                try
+                {
+                    SetButtonsEnabled(false);
+                    WriteLog("[>] 正在重启资源管理器...");
+
+                    int currentSessionId = Process.GetCurrentProcess().SessionId;
+                    foreach (Process p in Process.GetProcessesByName("explorer"))
+                    {
+                        if (p.SessionId == currentSessionId)
+                        {
+                            p.Kill();
+                            p.WaitForExit(1000);
+                        }
+                    }
+
+                    Thread.Sleep(1000);
+                    using (Process.Start("explorer.exe")) { }
+                    WriteLog("[√] 资源管理器已重启");
+                }
+                catch (Exception ex)
+                {
+                    WriteLog(string.Format("[×] 重启失败: {0}", ex.Message));
+                }
+                finally
+                {
+                    int remaining = Interlocked.Decrement(ref _activeTasks);
+                    if (remaining == 0)
+                        SetButtonsEnabled(true);
+                }
+            });
         }
 
         private void BtnNetworkInfo_Click(object sender, EventArgs e)
@@ -960,7 +1167,7 @@ namespace Win11FixGUI
 
                 if (interfaces.Count == 0)
                 {
-                    WriteLog("[警告] 当前系统未检测到活动的网络连接。");
+                    WriteLog("[!] 当前系统未检测到活动的网络连接。");
                     return;
                 }
 
@@ -993,7 +1200,7 @@ namespace Win11FixGUI
             }
             catch (Exception ex)
             {
-                WriteLog("[错误] 获取网络信息失败: " + ex.Message);
+                WriteLog("[×] 获取网络信息失败: " + ex.Message);
             }
         }
 
@@ -1001,13 +1208,13 @@ namespace Win11FixGUI
         {
             try
             {
-                WriteLog("[操作] 正在查询本机已保存的 WiFi 密码...");
+                WriteLog("[>] 正在查询本机已保存的 WiFi 密码...");
                 ProcessStartInfo psi = new ProcessStartInfo("netsh", "wlan show profiles")
                 {
                     RedirectStandardOutput = true,
                     UseShellExecute = false,
                     CreateNoWindow = true,
-                    StandardOutputEncoding = Encoding.GetEncoding(936)
+                    StandardOutputEncoding = Encoding.Default
                 };
 
                 using (Process p = Process.Start(psi))
@@ -1030,7 +1237,7 @@ namespace Win11FixGUI
 
                         if (profiles.Count == 0)
                         {
-                            WriteLog("[警告] 未找到任何连接过的 WiFi 配置文件。");
+                            WriteLog("[!] 未找到任何连接过的 WiFi 配置文件。");
                             return;
                         }
 
@@ -1041,7 +1248,7 @@ namespace Win11FixGUI
                                 RedirectStandardOutput = true,
                                 UseShellExecute = false,
                                 CreateNoWindow = true,
-                                StandardOutputEncoding = Encoding.GetEncoding(936)
+                                StandardOutputEncoding = Encoding.Default
                             };
 
                             using (Process pwdP = Process.Start(pwdPsi))
@@ -1075,7 +1282,7 @@ namespace Win11FixGUI
             }
             catch (Exception ex)
             {
-                WriteLog("[错误] 查询 WiFi 密码失败: " + ex.Message);
+                WriteLog("[×] 查询 WiFi 密码失败: " + ex.Message);
             }
         }
 
