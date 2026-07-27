@@ -74,14 +74,7 @@ namespace Win11FixGUI
         private Button btnActivateLocal;
         private Button btnCheckActivation;
 
-        private GroupBox grpTools;
-        private Button btnCPUZ;
-        private Button btnGPUZ;
-        private Button btnNotepadPP;
-        private Button btnWinRAR;
-        private Button btnPutty;
-        private Button btnDismPP;
-        private Button btnCrystalDiskInfo;
+        private GroupBox grpSystemSecurity;
         private Button btnDisableDefender;
         private Button btnDisableDefenderV21;
         private Button btnDisableUpdate;
@@ -92,25 +85,40 @@ namespace Win11FixGUI
         private Button btnServices;
         private Button btnRestartExplorer;
 
-        private GroupBox grpNetwork;
+        private GroupBox grpNetworkInfo;
         private Button btnNetworkInfo;
         private Button btnShowWifiPassword;
 
+        private GroupBox grpUtilities;
+        private Button btnCPUZ;
+        private Button btnGPUZ;
+        private Button btnDismPP;
+        private Button btnCrystalDiskInfo;
+        private Button btnNotepadPP;
+        private Button btnWinRAR;
+        private Button btnPutty;
+
         private RichTextBox txtLog;
+        private Button btnClearLog;
 
         private int buildNumber = 0;
         private string systemVersion = "未知系统";
         private bool isWin11 = false;
         private bool isClassicMenuEnabled = false;
 
-        private const int BTN_WIDTH = 138;
-        private const int BTN_HEIGHT = 27;
+        private const int BTN_WIDTH = 130;
+        private const int BTN_HEIGHT = 25;
         private const int BTN_GAP = 8;
         private const int LEFT_MARGIN = 10;
 
         private const string VERSION = "v1.0";
 
         private int _activeTasks = 0;
+
+        // ---------- Tab 切换相关 ----------
+        private Button[] _tabButtons;
+        private GroupBox[] _tabGroups;
+        private int _activeTabIndex = 0;
 
         // ---------- 注册表/系统常量 ----------
         private const string CLASSIC_MENU_KEY_PATH = @"Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32";
@@ -149,12 +157,14 @@ namespace Win11FixGUI
         private void InitializeComponent()
         {
             this.txtLog = new RichTextBox();
+            this.btnClearLog = new Button();
 
             this.grpSystemFix = new GroupBox();
             this.grpActivation = new GroupBox();
-            this.grpTools = new GroupBox();
+            this.grpSystemSecurity = new GroupBox();
             this.grpSysAdmin = new GroupBox();
-            this.grpNetwork = new GroupBox();
+            this.grpNetworkInfo = new GroupBox();
+            this.grpUtilities = new GroupBox();
 
             this.btnRestoreClassicMenu = new Button();
             this.btnTaskbarNeverCombine = new Button();
@@ -166,13 +176,6 @@ namespace Win11FixGUI
             this.btnActivateLocal = new Button();
             this.btnCheckActivation = new Button();
 
-            this.btnCPUZ = new Button();
-            this.btnGPUZ = new Button();
-            this.btnNotepadPP = new Button();
-            this.btnWinRAR = new Button();
-            this.btnPutty = new Button();
-            this.btnDismPP = new Button();
-            this.btnCrystalDiskInfo = new Button();
             this.btnDisableDefender = new Button();
             this.btnDisableDefenderV21 = new Button();
             this.btnDisableUpdate = new Button();
@@ -185,31 +188,79 @@ namespace Win11FixGUI
             this.btnNetworkInfo = new Button();
             this.btnShowWifiPassword = new Button();
 
+            this.btnCPUZ = new Button();
+            this.btnGPUZ = new Button();
+            this.btnDismPP = new Button();
+            this.btnCrystalDiskInfo = new Button();
+            this.btnNotepadPP = new Button();
+            this.btnWinRAR = new Button();
+            this.btnPutty = new Button();
+
             this.SuspendLayout();
 
             this.Text = "Windows 综合优化与维护工具 " + VERSION;
-            this.Size = new Size(660, 610);
+            this.Size = new Size(660, 445);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedSingle;
             this.MaximizeBox = false;
             this.MinimizeBox = true;
             this.BackColor = Color.FromArgb(248, 249, 250);
 
+            // ---------- 日志区域 ----------
             this.txtLog.Location = new Point(15, 12);
-            this.txtLog.Size = new Size(615, 140);
+            this.txtLog.Size = new Size(615, 250);
             this.txtLog.ReadOnly = true;
             this.txtLog.BackColor = Color.FromArgb(30, 32, 38);
             this.txtLog.ForeColor = Color.FromArgb(230, 235, 240);
             this.txtLog.Font = new Font("Consolas", 9F, FontStyle.Regular);
             this.txtLog.BorderStyle = BorderStyle.None;
 
-            int currentY = 162;
-            int groupWidth = 615;
-            int groupHeight = 54;
+            // 清空日志按钮（覆盖在日志右上角）
+            this.btnClearLog.Text = "清空";
+            this.btnClearLog.Size = new Size(55, 20);
+            this.btnClearLog.Location = new Point(573, 14);
+            this.btnClearLog.Font = new Font("Microsoft YaHei UI", 7F, FontStyle.Regular);
+            this.btnClearLog.FlatStyle = FlatStyle.Flat;
+            this.btnClearLog.FlatAppearance.BorderSize = 0;
+            this.btnClearLog.BackColor = Color.FromArgb(55, 60, 70);
+            this.btnClearLog.ForeColor = Color.FromArgb(180, 185, 190);
+            this.btnClearLog.Cursor = Cursors.Hand;
+            this.btnClearLog.Click += (s, e) => { txtLog.Clear(); };
 
-            // 系统设置（双行布局，新增自动锁屏）
-            int systemFixGroupHeight = 80;
-            SetupGroupBox(grpSystemFix, "系统设置", 15, currentY, groupWidth, systemFixGroupHeight);
+            // ---------- Tab 切换按钮 ----------
+            string[] tabNames = { "系统体验", "系统激活", "系统安全", "系统管理", "网络信息", "实用工具" };
+            _tabButtons = new Button[tabNames.Length];
+            int tabY = 268;
+            int tabWidth = 95;
+            int tabHeight = 28;
+            int tabGap = 4;
+
+            for (int i = 0; i < tabNames.Length; i++)
+            {
+                var btn = new Button();
+                btn.Text = tabNames[i];
+                btn.Size = new Size(tabWidth, tabHeight);
+                btn.Location = new Point(15 + (tabWidth + tabGap) * i, tabY);
+                btn.Font = new Font("Microsoft YaHei UI", 8F, FontStyle.Regular);
+                btn.FlatStyle = FlatStyle.Flat;
+                btn.FlatAppearance.BorderSize = 0;
+                btn.Cursor = Cursors.Hand;
+                btn.Tag = i;
+                btn.Click += TabButton_Click;
+                _tabButtons[i] = btn;
+                this.Controls.Add(btn);
+            }
+
+            // ---------- 内容区域（所有分组同位，按 Tab 切换可见性）----------
+            int contentY = 302;
+            int groupWidth = 615;
+            int groupHeight = 110;
+            int rowGap = BTN_WIDTH + BTN_GAP;
+            int row2Y = 18 + BTN_HEIGHT + 4;
+int row3Y = 18 + (BTN_HEIGHT + 4) * 2;
+
+            // ===== 1. 系统体验（双行：4 + 1）=====
+            SetupGroupBox(grpSystemFix, "系统体验", 15, contentY, groupWidth, groupHeight);
             SetButtonProps(btnRestoreClassicMenu, "恢复经典右键", BtnRestoreClassicMenu_Click);
             SetButtonProps(btnTaskbarNeverCombine, "任务栏设置", BtnTaskbarNeverCombine_Click);
             SetButtonProps(btnDesktopShowIcons, "桌面图标设置", BtnDesktopShowIcons_Click);
@@ -220,17 +271,14 @@ namespace Win11FixGUI
             grpSystemFix.Controls.Add(btnDesktopShowIcons);
             grpSystemFix.Controls.Add(btnDisableMousePrecision);
             grpSystemFix.Controls.Add(btnAutoLock);
-            // 第一行: 恢复经典右键, 任务栏设置, 桌面图标设置, 关闭鼠标精准
             btnRestoreClassicMenu.Location = new Point(LEFT_MARGIN, 18);
-            btnTaskbarNeverCombine.Location = new Point(LEFT_MARGIN + (BTN_WIDTH + BTN_GAP), 18);
-            btnDesktopShowIcons.Location = new Point(LEFT_MARGIN + (BTN_WIDTH + BTN_GAP) * 2, 18);
-            btnDisableMousePrecision.Location = new Point(LEFT_MARGIN + (BTN_WIDTH + BTN_GAP) * 3, 18);
-            // 第二行: 自动锁屏
-            btnAutoLock.Location = new Point(LEFT_MARGIN, 18 + BTN_HEIGHT + 4);
-            currentY += systemFixGroupHeight + 6;
+            btnTaskbarNeverCombine.Location = new Point(LEFT_MARGIN + rowGap, 18);
+            btnDesktopShowIcons.Location = new Point(LEFT_MARGIN + rowGap * 2, 18);
+            btnDisableMousePrecision.Location = new Point(LEFT_MARGIN + rowGap * 3, 18);
+            btnAutoLock.Location = new Point(LEFT_MARGIN, row2Y);
 
-            // 系统激活
-            SetupGroupBox(grpActivation, "系统激活", 15, currentY, groupWidth, groupHeight);
+            // ===== 2. 系统激活（单行：3）=====
+            SetupGroupBox(grpActivation, "系统激活", 15, contentY, groupWidth, groupHeight);
             SetButtonProps(btnActivateOnline, "在线激活 Windows", BtnActivateOnline_Click);
             SetButtonProps(btnActivateLocal, "本地激活 (MAS)", BtnActivateLocal_Click);
             SetButtonProps(btnCheckActivation, "查询激活状态", BtnCheckActivation_Click);
@@ -238,79 +286,108 @@ namespace Win11FixGUI
             grpActivation.Controls.Add(btnActivateLocal);
             grpActivation.Controls.Add(btnCheckActivation);
             AlignButtonsLeft(grpActivation, btnActivateOnline, btnActivateLocal, btnCheckActivation);
-            currentY += 60;
 
-            // 工具（三行布局）
-            int toolsGroupHeight = 110;
-            SetupGroupBox(grpTools, "工具", 15, currentY, groupWidth, toolsGroupHeight);
-            SetButtonProps(btnCPUZ, "CPU-Z", delegate { RunEmbeddedTool("cpuz.exe"); });
-            SetButtonProps(btnGPUZ, "GPU-Z", delegate { RunEmbeddedTool("GPU-Z.exe"); });
-            SetButtonProps(btnNotepadPP, "Notepad++", delegate { RunEmbeddedTool("Notepad++.zip"); });
-            SetButtonProps(btnWinRAR, "WinRAR", delegate { RunEmbeddedTool("winrar.exe"); });
-            SetButtonProps(btnPutty, "PuTTY", delegate { RunEmbeddedTool("putty.exe"); });
-            SetButtonProps(btnDismPP, "Dism++", delegate { RunEmbeddedTool("Dism++.zip"); });
-            SetButtonProps(btnCrystalDiskInfo, "CrystalDiskInfo", delegate { RunEmbeddedTool("CrystalDiskInfo.zip"); });
+            // ===== 3. 系统安全（单行：3）=====
+            SetupGroupBox(grpSystemSecurity, "系统安全", 15, contentY, groupWidth, groupHeight);
             SetButtonProps(btnDisableDefender, "Defender_v1.6", delegate { RunEmbeddedTool("关闭windows Defender.zip"); });
             SetButtonProps(btnDisableDefenderV21, "Defender_v2.1", delegate { RunEmbeddedTool("关闭windows Defender_v2.1.zip"); });
             SetButtonProps(btnDisableUpdate, "关闭 Update", delegate { RunEmbeddedTool("关闭windows update.zip"); });
-            grpTools.Controls.Add(btnCPUZ);
-            grpTools.Controls.Add(btnGPUZ);
-            grpTools.Controls.Add(btnNotepadPP);
-            grpTools.Controls.Add(btnWinRAR);
-            grpTools.Controls.Add(btnPutty);
-            grpTools.Controls.Add(btnDismPP);
-            grpTools.Controls.Add(btnCrystalDiskInfo);
-            grpTools.Controls.Add(btnDisableDefender);
-            grpTools.Controls.Add(btnDisableDefenderV21);
-            grpTools.Controls.Add(btnDisableUpdate);
-            int rowStep = BTN_HEIGHT + 4;
-            int rowGap = BTN_WIDTH + BTN_GAP;
-            // 第一行: CPU-Z, GPU-Z, Notepad++, WinRAR
-            btnCPUZ.Location = new Point(LEFT_MARGIN, 18);
-            btnGPUZ.Location = new Point(LEFT_MARGIN + rowGap, 18);
-            btnNotepadPP.Location = new Point(LEFT_MARGIN + rowGap * 2, 18);
-            btnWinRAR.Location = new Point(LEFT_MARGIN + rowGap * 3, 18);
-            // 第二行: PuTTY, Dism++, CrystalDiskInfo
-            int row2Y = 18 + rowStep;
-            btnPutty.Location = new Point(LEFT_MARGIN, row2Y);
-            btnDismPP.Location = new Point(LEFT_MARGIN + rowGap, row2Y);
-            btnCrystalDiskInfo.Location = new Point(LEFT_MARGIN + rowGap * 2, row2Y);
-            // 第三行: Defender_v1.6, Defender_v2.1, 关闭 Update
-            int row3Y = 18 + rowStep * 2;
-            btnDisableDefender.Location = new Point(LEFT_MARGIN, row3Y);
-            btnDisableDefenderV21.Location = new Point(LEFT_MARGIN + rowGap, row3Y);
-            btnDisableUpdate.Location = new Point(LEFT_MARGIN + rowGap * 2, row3Y);
-            currentY += toolsGroupHeight + 6;
+            grpSystemSecurity.Controls.Add(btnDisableDefender);
+            grpSystemSecurity.Controls.Add(btnDisableDefenderV21);
+            grpSystemSecurity.Controls.Add(btnDisableUpdate);
+            AlignButtonsLeft(grpSystemSecurity, btnDisableDefender, btnDisableDefenderV21, btnDisableUpdate);
 
-            // 系统管理组件
-            SetupGroupBox(grpSysAdmin, "系统管理组件", 15, currentY, groupWidth, groupHeight);
+            // ===== 4. 系统管理（单行：4）=====
+            SetupGroupBox(grpSysAdmin, "系统管理", 15, contentY, groupWidth, groupHeight);
             SetButtonProps(btnControlPanel, "控制面板", BtnControlPanel_Click);
-            SetButtonProps(btnServices, "系统服务", BtnServices_Click);
             SetButtonProps(btnSecpol, "本地安全策略", BtnSecpol_Click);
-            SetButtonProps(btnRestartExplorer, "重启Explorer", BtnRestartExplorer_Click);
+            SetButtonProps(btnServices, "系统服务", BtnServices_Click);
+            SetButtonProps(btnRestartExplorer, "重启 Explorer", BtnRestartExplorer_Click);
             grpSysAdmin.Controls.Add(btnControlPanel);
-            grpSysAdmin.Controls.Add(btnServices);
             grpSysAdmin.Controls.Add(btnSecpol);
+            grpSysAdmin.Controls.Add(btnServices);
             grpSysAdmin.Controls.Add(btnRestartExplorer);
-            AlignButtonsLeft(grpSysAdmin, btnControlPanel, btnServices, btnSecpol, btnRestartExplorer);
-            currentY += 60;
+            AlignButtonsLeft(grpSysAdmin, btnControlPanel, btnSecpol, btnServices, btnRestartExplorer);
 
-            // 网络查看
-            SetupGroupBox(grpNetwork, "网络查看", 15, currentY, groupWidth, groupHeight);
+            // ===== 5. 网络信息（单行：2）=====
+            SetupGroupBox(grpNetworkInfo, "网络信息", 15, contentY, groupWidth, groupHeight);
             SetButtonProps(btnNetworkInfo, "获取网络信息", BtnNetworkInfo_Click);
             SetButtonProps(btnShowWifiPassword, "查看 WiFi 密码", BtnShowWifiPassword_Click);
-            grpNetwork.Controls.Add(btnNetworkInfo);
-            grpNetwork.Controls.Add(btnShowWifiPassword);
-            AlignButtonsLeft(grpNetwork, btnNetworkInfo, btnShowWifiPassword);
+            grpNetworkInfo.Controls.Add(btnNetworkInfo);
+            grpNetworkInfo.Controls.Add(btnShowWifiPassword);
+            AlignButtonsLeft(grpNetworkInfo, btnNetworkInfo, btnShowWifiPassword);
 
+            // ===== 6. 实用工具（双行：4 + 3）=====
+            SetupGroupBox(grpUtilities, "实用工具", 15, contentY, groupWidth, groupHeight);
+            SetButtonProps(btnCPUZ, "CPU-Z", delegate { RunEmbeddedTool("cpuz.exe"); });
+            SetButtonProps(btnGPUZ, "GPU-Z", delegate { RunEmbeddedTool("GPU-Z.exe"); });
+            SetButtonProps(btnDismPP, "Dism++", delegate { RunEmbeddedTool("Dism++.zip"); });
+            SetButtonProps(btnCrystalDiskInfo, "CrystalDiskInfo", delegate { RunEmbeddedTool("CrystalDiskInfo.zip"); });
+            SetButtonProps(btnNotepadPP, "Notepad++", delegate { RunEmbeddedTool("Notepad++.zip"); });
+            SetButtonProps(btnWinRAR, "WinRAR", delegate { RunEmbeddedTool("winrar.exe"); });
+            SetButtonProps(btnPutty, "PuTTY", delegate { RunEmbeddedTool("putty.exe"); });
+            grpUtilities.Controls.Add(btnCPUZ);
+            grpUtilities.Controls.Add(btnGPUZ);
+            grpUtilities.Controls.Add(btnDismPP);
+            grpUtilities.Controls.Add(btnCrystalDiskInfo);
+            grpUtilities.Controls.Add(btnNotepadPP);
+            grpUtilities.Controls.Add(btnWinRAR);
+            grpUtilities.Controls.Add(btnPutty);
+            btnCPUZ.Location = new Point(LEFT_MARGIN, 18);
+            btnGPUZ.Location = new Point(LEFT_MARGIN + rowGap, 18);
+            btnDismPP.Location = new Point(LEFT_MARGIN + rowGap * 2, 18);
+            btnCrystalDiskInfo.Location = new Point(LEFT_MARGIN + rowGap * 3, 18);
+            btnNotepadPP.Location = new Point(LEFT_MARGIN, row2Y);
+            btnWinRAR.Location = new Point(LEFT_MARGIN + rowGap, row2Y);
+            btnPutty.Location = new Point(LEFT_MARGIN + rowGap * 2, row2Y);
+
+            // ---------- 构建 Tab 分组数组 ----------
+            _tabGroups = new GroupBox[] { grpSystemFix, grpActivation, grpSystemSecurity, grpSysAdmin, grpNetworkInfo, grpUtilities };
+
+            // ---------- 添加到窗体 ----------
             this.Controls.Add(this.txtLog);
-            this.Controls.Add(this.grpSystemFix);
-            this.Controls.Add(this.grpActivation);
-            this.Controls.Add(this.grpTools);
-            this.Controls.Add(this.grpSysAdmin);
-            this.Controls.Add(this.grpNetwork);
+            this.Controls.Add(this.btnClearLog);
+            foreach (var g in _tabGroups)
+                this.Controls.Add(g);
+
+            // 默认显示第一个 Tab
+            SwitchTab(0);
 
             this.ResumeLayout(false);
+        }
+
+        // ---------- Tab 切换 ----------
+        private void TabButton_Click(object sender, EventArgs e)
+        {
+            int index = (int)((Button)sender).Tag;
+            SwitchTab(index);
+        }
+
+        private void SwitchTab(int index)
+        {
+            _activeTabIndex = index;
+
+            for (int i = 0; i < _tabButtons.Length; i++)
+            {
+                if (i == index)
+                {
+                    _tabButtons[i].BackColor = Color.White;
+                    _tabButtons[i].ForeColor = Color.FromArgb(30, 100, 210);
+                    _tabButtons[i].FlatAppearance.BorderSize = 1;
+                    _tabButtons[i].FlatAppearance.BorderColor = Color.FromArgb(200, 205, 212);
+                }
+                else
+                {
+                    _tabButtons[i].BackColor = Color.FromArgb(240, 242, 245);
+                    _tabButtons[i].ForeColor = Color.FromArgb(130, 135, 145);
+                    _tabButtons[i].FlatAppearance.BorderSize = 0;
+                }
+            }
+
+            for (int i = 0; i < _tabGroups.Length; i++)
+            {
+                _tabGroups[i].Visible = (i == index);
+            }
         }
 
         private void SetupGroupBox(GroupBox grp, string text, int x, int y, int width, int height)
@@ -430,6 +507,14 @@ namespace Win11FixGUI
             try
             {
                 text = text.TrimStart('\r', '\n');
+
+                // 时间戳前缀
+                string timestamp = string.Format("[{0:HH:mm:ss}] ", DateTime.Now);
+                this.txtLog.SelectionStart = this.txtLog.TextLength;
+                this.txtLog.SelectionLength = 0;
+                this.txtLog.SelectionColor = Color.FromArgb(100, 105, 115);
+                this.txtLog.SelectionFont = _logMutedFont;
+                this.txtLog.AppendText(timestamp);
 
                 int closeBracket = text.IndexOf(']');
                 if (text.StartsWith("[") && closeBracket > 0)
@@ -957,10 +1042,14 @@ namespace Win11FixGUI
         {
             try
             {
+                int currentSessionId = Process.GetCurrentProcess().SessionId;
                 foreach (Process p in Process.GetProcessesByName("explorer"))
                 {
-                    p.Kill();
-                    p.WaitForExit(1000);
+                    if (p.SessionId == currentSessionId)
+                    {
+                        p.Kill();
+                        p.WaitForExit(1000);
+                    }
                 }
                 Thread.Sleep(300);
                 using (Process.Start("explorer.exe")) { }
@@ -1046,9 +1135,10 @@ namespace Win11FixGUI
             };
             using (Process p = Process.Start(psi))
             {
-                // 先等待进程退出，再读取输出，避免死锁
+                // 先读取输出，再等待进程退出，避免死锁
+                string output = p.StandardOutput.ReadToEnd();
                 p.WaitForExit();
-                return p.StandardOutput.ReadToEnd();
+                return output;
             }
         }
 
@@ -1127,19 +1217,7 @@ namespace Win11FixGUI
                 {
                     SetButtonsEnabled(false);
                     WriteLog("[>] 正在重启资源管理器...");
-
-                    int currentSessionId = Process.GetCurrentProcess().SessionId;
-                    foreach (Process p in Process.GetProcessesByName("explorer"))
-                    {
-                        if (p.SessionId == currentSessionId)
-                        {
-                            p.Kill();
-                            p.WaitForExit(1000);
-                        }
-                    }
-
-                    Thread.Sleep(1000);
-                    using (Process.Start("explorer.exe")) { }
+                    RestartExplorer();
                     WriteLog("[√] 资源管理器已重启");
                 }
                 catch (Exception ex)
