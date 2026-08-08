@@ -1,33 +1,40 @@
 using System;
 using System.Drawing;
-using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using System.Xml;
 
 namespace ColorCop
 {
-    // ========== NativeMethods ==========
     internal static class NativeMethods
     {
         public const int HWND_BROADCAST = 0xFFFF;
-        public const int WM_SHOW_COLORCOP = 0x8000 + 0x100;
         public const int WM_HOTKEY = 0x0312;
         public const int MOD_ALT = 0x0001;
         public const int MOD_CONTROL = 0x0002;
+        public const int VK_LBUTTON = 0x01;
+        public const int VK_RBUTTON = 0x02;
+        public const int VK_ESCAPE = 0x1B;
+
+        public static readonly int WM_SHOW_COLORCOP = RegisterWindowMessage("ColorCop.Show");
 
         [StructLayout(LayoutKind.Sequential)]
         public struct POINT
         {
             public int X;
             public int Y;
-            public POINT(int x, int y) { X = x; Y = y; }
+
+            public POINT(int x, int y)
+            {
+                X = x;
+                Y = y;
+            }
         }
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr GetDC(IntPtr hWnd);
 
-        [DllImport("user32.dll")]
+        [DllImport("user32.dll", SetLastError = true)]
         public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
 
         [DllImport("gdi32.dll")]
@@ -39,17 +46,19 @@ namespace ColorCop
         [DllImport("user32.dll")]
         public static extern short GetAsyncKeyState(int vKey);
 
-        [DllImport("user32.dll")]
+        [DllImport("user32.dll", SetLastError = true)]
         public static extern bool RegisterHotKey(IntPtr hWnd, int id, int fsModifiers, int vk);
 
-        [DllImport("user32.dll")]
+        [DllImport("user32.dll", SetLastError = true)]
         public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
-        [DllImport("user32.dll")]
-        public static extern bool PostMessage(IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int RegisterWindowMessage(string lpString);
     }
 
-    // ========== ColorHelpers ==========
     public static class ColorHelpers
     {
         public static string FormatHtml(Color color, bool uppercase, bool omitSymbol)
@@ -58,80 +67,51 @@ namespace ColorCop
             string hex = string.Format(format, color.R, color.G, color.B);
             return omitSymbol ? hex : "#" + hex;
         }
+
+        public static Color GetReadableTextColor(Color background)
+        {
+            double luminance = (background.R * 0.299) + (background.G * 0.587) + (background.B * 0.114);
+            return luminance >= 160 ? Color.FromArgb(32, 32, 32) : Color.White;
+        }
     }
 
-    // ========== ScreenSampler ==========
     public static class ScreenSampler
     {
         public static Color GetPixel(int x, int y)
         {
             IntPtr hdc = NativeMethods.GetDC(IntPtr.Zero);
             if (hdc == IntPtr.Zero)
+            {
                 return Color.Black;
+            }
+
             try
             {
                 int pixel = NativeMethods.GetPixel(hdc, x, y);
-                return Color.FromArgb((pixel >> 0) & 0xFF, (pixel >> 8) & 0xFF, (pixel >> 16) & 0xFF);
+                if (pixel == -1)
+                {
+                    return Color.Black;
+                }
+
+                int r = pixel & 0x000000FF;
+                int g = (pixel & 0x0000FF00) >> 8;
+                int b = (pixel & 0x00FF0000) >> 16;
+                return Color.FromArgb(r, g, b);
             }
             finally
             {
                 NativeMethods.ReleaseDC(IntPtr.Zero, hdc);
             }
         }
-
-        public static Bitmap CaptureRegion(int x, int y, int width, int height)
-        {
-            Bitmap bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
-            using (Graphics g = Graphics.FromImage(bmp))
-            {
-                g.CopyFromScreen(x, y, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
-            }
-            return bmp;
-        }
-
-        public static Color SampleArea(int x, int y, int width, int height)
-        {
-            using (Bitmap bmp = CaptureRegion(x, y, width, height))
-            {
-                long totalR = 0, totalG = 0, totalB = 0;
-                int count = 0;
-                BitmapData bd = bmp.LockBits(new Rectangle(0, 0, width, height),
-                    ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-                try
-                {
-                    int stride = bd.Stride;
-                    byte[] pixels = new byte[stride * height];
-                    Marshal.Copy(bd.Scan0, pixels, 0, pixels.Length);
-                    for (int py = 0; py < height; py++)
-                    {
-                        int row = py * stride;
-                        for (int px = 0; px < width; px++)
-                        {
-                            int col = row + px * 4;
-                            totalB += pixels[col];
-                            totalG += pixels[col + 1];
-                            totalR += pixels[col + 2];
-                            count++;
-                        }
-                    }
-                }
-                finally
-                {
-                    bmp.UnlockBits(bd);
-                }
-                return (count == 0) ? Color.Black : Color.FromArgb(
-                    (int)(totalR / count), (int)(totalG / count), (int)(totalB / count));
-            }
-        }
     }
 
-    // ========== SettingsManager ==========
     internal static class SettingsManager
     {
         public static bool AlwaysOnTop { get; set; }
         public static bool AutoCopyToClipboard { get; set; }
         public static int WindowX { get; set; }
         public static int WindowY { get; set; }
+
         private static string _settingsPath;
 
         public static void Initialize()
@@ -139,8 +119,11 @@ namespace ColorCop
             string appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             string dir = System.IO.Path.Combine(appData, "ColorCop");
             if (!System.IO.Directory.Exists(dir))
+            {
                 System.IO.Directory.CreateDirectory(dir);
-            _settingsPath = System.IO.Path.Combine(dir, "Color_Cop.dat");
+            }
+
+            _settingsPath = System.IO.Path.Combine(dir, "ColorCop.settings");
             LoadDefaults();
             Load();
         }
@@ -149,15 +132,25 @@ namespace ColorCop
         {
             AlwaysOnTop = false;
             AutoCopyToClipboard = false;
-            WindowX = 200;
-            WindowY = 200;
+            WindowX = int.MinValue;
+            WindowY = int.MinValue;
         }
 
         public static void Save()
         {
+            if (string.IsNullOrEmpty(_settingsPath))
+            {
+                return;
+            }
+
             try
             {
-                using (XmlWriter writer = XmlWriter.Create(_settingsPath, new XmlWriterSettings { Indent = true }))
+                XmlWriterSettings settings = new XmlWriterSettings
+                {
+                    Indent = true
+                };
+
+                using (XmlWriter writer = XmlWriter.Create(_settingsPath, settings))
                 {
                     writer.WriteStartDocument();
                     writer.WriteStartElement("ColorCopSettings");
@@ -177,17 +170,28 @@ namespace ColorCop
 
         public static void Load()
         {
+            if (string.IsNullOrEmpty(_settingsPath) || !System.IO.File.Exists(_settingsPath))
+            {
+                return;
+            }
+
             try
             {
-                if (!System.IO.File.Exists(_settingsPath))
-                    return;
-                string xml = System.IO.File.ReadAllText(_settingsPath);
-                using (XmlReader reader = XmlReader.Create(new System.IO.StringReader(xml)))
+                using (XmlReader reader = XmlReader.Create(_settingsPath))
                 {
                     while (reader.Read())
                     {
-                        if (reader.NodeType == XmlNodeType.Element)
-                            ReadSetting(reader);
+                        if (reader.NodeType != XmlNodeType.Element)
+                        {
+                            continue;
+                        }
+
+                        if (reader.Name == "ColorCopSettings")
+                        {
+                            continue;
+                        }
+
+                        ReadSetting(reader);
                     }
                 }
             }
@@ -202,21 +206,40 @@ namespace ColorCop
         {
             string name = reader.Name;
             string content = reader.ReadElementContentAsString();
-            int intVal;
-            bool boolVal;
-            if (name == "WindowX" && int.TryParse(content, out intVal)) { WindowX = intVal; return; }
-            if (name == "WindowY" && int.TryParse(content, out intVal)) { WindowY = intVal; return; }
-            if (name == "AlwaysOnTop" && bool.TryParse(content, out boolVal)) { AlwaysOnTop = boolVal; return; }
-            if (name == "AutoCopyToClipboard" && bool.TryParse(content, out boolVal)) { AutoCopyToClipboard = boolVal; return; }
+
+            int intValue;
+            bool boolValue;
+
+            if (name == "WindowX" && int.TryParse(content, out intValue))
+            {
+                WindowX = intValue;
+                return;
+            }
+
+            if (name == "WindowY" && int.TryParse(content, out intValue))
+            {
+                WindowY = intValue;
+                return;
+            }
+
+            if (name == "AlwaysOnTop" && bool.TryParse(content, out boolValue))
+            {
+                AlwaysOnTop = boolValue;
+                return;
+            }
+
+            if (name == "AutoCopyToClipboard" && bool.TryParse(content, out boolValue))
+            {
+                AutoCopyToClipboard = boolValue;
+            }
         }
     }
 
-    // ========== TrayManager ==========
-    public class TrayManager : IDisposable
+    public sealed class TrayManager : IDisposable
     {
+        private readonly MainForm _mainForm;
         private NotifyIcon _notifyIcon;
         private ContextMenuStrip _contextMenu;
-        private MainForm _mainForm;
 
         public TrayManager(MainForm mainForm)
         {
@@ -226,33 +249,60 @@ namespace ColorCop
 
         private void Initialize()
         {
-            _contextMenu = new ContextMenuStrip();
-            _contextMenu.Items.Add("恢复窗口", null, (s, e) => { _mainForm.ShowWindow(); });
-            _contextMenu.Items.Add(new ToolStripSeparator());
-            _contextMenu.Items.Add("退出", null, (s, e) => { _mainForm.ExitApplication(); });
-            _contextMenu.Items[0].Font = new System.Drawing.Font(_contextMenu.Items[0].Font, System.Drawing.FontStyle.Bold);
+            _contextMenu = new ContextMenuStrip
+            {
+                Font = new Font("Segoe UI", 9F)
+            };
 
-            _notifyIcon = new NotifyIcon();
-            _notifyIcon.Text = "Color Cop 取色器";
+            ToolStripItem restoreItem = _contextMenu.Items.Add("显示取色器");
+            restoreItem.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
+            restoreItem.Click += delegate { _mainForm.ShowWindow(); };
+
+            _contextMenu.Items.Add(new ToolStripSeparator());
+            _contextMenu.Items.Add("退出程序", null, delegate { _mainForm.ExitApplication(); });
+
+            _notifyIcon = new NotifyIcon
+            {
+                Text = "Color Cop 取色器",
+                Visible = false,
+                ContextMenuStrip = _contextMenu
+            };
+
             try
             {
-                _notifyIcon.Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                _notifyIcon.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             }
             catch
             {
-                _notifyIcon.Icon = System.Drawing.SystemIcons.Application;
+                _notifyIcon.Icon = SystemIcons.Application;
             }
-            _notifyIcon.ContextMenuStrip = _contextMenu;
-            _notifyIcon.Visible = false;
-            _notifyIcon.MouseDoubleClick += (s, e) =>
-            {
-                if (e.Button == MouseButtons.Left)
-                    _mainForm.ShowWindow();
-            };
+
+            _notifyIcon.MouseDoubleClick += NotifyIcon_MouseDoubleClick;
         }
 
-        public void Show() { _notifyIcon.Visible = true; }
-        public void Hide() { _notifyIcon.Visible = false; }
+        private void NotifyIcon_MouseDoubleClick(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                _mainForm.ShowWindow();
+            }
+        }
+
+        public void Show()
+        {
+            if (_notifyIcon != null)
+            {
+                _notifyIcon.Visible = true;
+            }
+        }
+
+        public void Hide()
+        {
+            if (_notifyIcon != null)
+            {
+                _notifyIcon.Visible = false;
+            }
+        }
 
         public void Dispose()
         {
@@ -262,6 +312,7 @@ namespace ColorCop
                 _notifyIcon.Dispose();
                 _notifyIcon = null;
             }
+
             if (_contextMenu != null)
             {
                 _contextMenu.Dispose();
@@ -270,225 +321,363 @@ namespace ColorCop
         }
     }
 
-    // ========== MainForm ==========
-    public class MainForm : Form
+    public sealed class MainForm : Form
     {
-        private const int HOTKEY_ID = 1;
-        private const int EYE_DROPPER_INTERVAL = 50;
+        private const int HotKeyId = 1;
+        private const int EyeDropperInterval = 40;
 
         private static readonly Color AccentColor = Color.FromArgb(0, 120, 212);
-        private static readonly Color FormBgColor = Color.FromArgb(248, 248, 248);
-        private static readonly Color StatusBarColor = Color.FromArgb(235, 235, 238);
-        private static readonly Color SubtleTextColor = Color.FromArgb(96, 96, 96);
+        private static readonly Color FormBackgroundColor = Color.FromArgb(245, 247, 250);
+        private static readonly Color CardColor = Color.White;
+        private static readonly Color SoftBorderColor = Color.FromArgb(222, 226, 232);
+        private static readonly Color SoftTextColor = Color.FromArgb(96, 100, 108);
+        private static readonly Color StatusBarColor = Color.FromArgb(238, 242, 247);
 
-        private Panel _colorPreview;
+        private readonly Timer _eyeDropperTimer;
+
+        private Panel _previewCard;
+        private Panel _previewSwatch;
+        private Label _lblPreviewHex;
+        private Label _lblPreviewHint;
+        private Label _lblHotKeyHint;
         private Button _btnPick;
         private Button _btnCopy;
         private TextBox _txtHex;
-        private CheckBox _chkAlwaysOnTop;
-        private CheckBox _chkAutoCopy;
         private TextBox _txtR;
         private TextBox _txtG;
         private TextBox _txtB;
+        private CheckBox _chkAlwaysOnTop;
+        private CheckBox _chkAutoCopy;
         private Label _lblStatus;
-        private GroupBox _grpRgb;
+        private Panel _rgbCard;
+        private TrayManager _trayManager;
 
         private Color _currentColor;
         private bool _eyeDropping;
-        private Timer _eyeDropperTimer;
-        private TrayManager _trayManager;
+        private bool _awaitingMouseRelease;
+        private bool _hotKeyRegistered;
 
         public MainForm()
         {
-            _currentColor = Color.FromArgb(0, 51, 34);
-            _eyeDropping = false;
+            _currentColor = Color.FromArgb(0, 120, 212);
             _eyeDropperTimer = new Timer();
-            _eyeDropperTimer.Interval = EYE_DROPPER_INTERVAL;
+            _eyeDropperTimer.Interval = EyeDropperInterval;
             _eyeDropperTimer.Tick += EyeDropperTimer_Tick;
 
-            this.DoubleBuffered = true;
-            this.Font = new Font("Segoe UI", 9F);
-            this.BackColor = FormBgColor;
+            AutoScaleMode = AutoScaleMode.Dpi;
+            DoubleBuffered = true;
+            Font = new Font("Segoe UI", 9F);
+            BackColor = FormBackgroundColor;
 
             InitializeComponent();
             ApplySettings();
+            RestoreWindowPosition();
             UpdateDisplay();
-            RegisterHotKey();
         }
 
         protected override void OnLoad(EventArgs e)
         {
             base.OnLoad(e);
             _trayManager = new TrayManager(this);
+            SetStatus("就绪，点击“开始取色”或按 Ctrl+Alt+C。");
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            RegisterHotKey();
+        }
+
+        protected override void OnHandleDestroyed(EventArgs e)
+        {
+            UnregisterHotKey();
+            base.OnHandleDestroyed(e);
         }
 
         private void InitializeComponent()
         {
-            this.Text = "Color Cop 取色器";
-            this.ClientSize = new Size(380, 240);
-            this.FormBorderStyle = FormBorderStyle.FixedSingle;
-            this.MaximizeBox = false;
-            this.MinimizeBox = true;
-            this.StartPosition = FormStartPosition.Manual;
-            if (SettingsManager.WindowX > 0 && SettingsManager.WindowY > 0)
-                this.Location = new Point(SettingsManager.WindowX, SettingsManager.WindowY);
+            SuspendLayout();
 
-            // ---- Color Preview ----
-            _colorPreview = new Panel();
-            _colorPreview.BorderStyle = BorderStyle.FixedSingle;
-            _colorPreview.Location = new Point(16, 16);
-            _colorPreview.Size = new Size(100, 100);
-            _colorPreview.BackColor = _currentColor;
-            _colorPreview.Paint += ColorPreview_Paint;
+            Text = "Color Cop 取色器";
+            ClientSize = new Size(470, 373);
+            MinimumSize = new Size(486, 412);
+            FormBorderStyle = FormBorderStyle.FixedSingle;
+            MaximizeBox = false;
+            MinimizeBox = true;
+            Padding = new Padding(0);
+            StartPosition = FormStartPosition.CenterScreen;
 
-            // ---- Pick Button (primary) ----
-            _btnPick = new Button();
-            _btnPick.Text = "取色";
-            _btnPick.Location = new Point(132, 16);
-            _btnPick.Size = new Size(80, 34);
-            _btnPick.FlatStyle = FlatStyle.Flat;
-            _btnPick.BackColor = AccentColor;
-            _btnPick.ForeColor = Color.White;
+            Panel root = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Transparent
+            };
+
+            _previewCard = CreateCardPanel(new Rectangle(16, 16, 150, 212));
+            _previewSwatch = new Panel
+            {
+                Location = new Point(14, 14),
+                Size = new Size(122, 122),
+                BackColor = _currentColor
+            };
+            _previewSwatch.Paint += PreviewSwatch_Paint;
+
+            _lblPreviewHex = new Label
+            {
+                Location = new Point(14, 149),
+                Size = new Size(122, 24),
+                Font = new Font("Segoe UI Semibold", 13F, FontStyle.Bold),
+                TextAlign = ContentAlignment.MiddleCenter
+            };
+
+            _lblPreviewHint = new Label
+            {
+                Location = new Point(14, 177),
+                Size = new Size(122, 18),
+                Font = new Font("Segoe UI", 8.5F),
+                ForeColor = SoftTextColor,
+                Text = "实时颜色预览",
+                TextAlign = ContentAlignment.MiddleCenter
+            };
+
+            _previewCard.Controls.AddRange(new Control[]
+            {
+                _previewSwatch, _lblPreviewHex, _lblPreviewHint
+            });
+
+            Panel rightCard = CreateCardPanel(new Rectangle(178, 16, 276, 212));
+
+            Label lblTitle = new Label
+            {
+                Location = new Point(18, 14),
+                Size = new Size(180, 26),
+                Text = "屏幕取色器",
+                Font = new Font("Segoe UI Semibold", 13F, FontStyle.Bold),
+                ForeColor = Color.FromArgb(32, 32, 32)
+            };
+
+            _lblHotKeyHint = new Label
+            {
+                Location = new Point(18, 40),
+                Size = new Size(220, 20),
+                Text = "快捷键: Ctrl+Alt+C",
+                ForeColor = SoftTextColor
+            };
+
+            _btnPick = new Button
+            {
+                Location = new Point(18, 69),
+                Size = new Size(112, 36),
+                Text = "开始取色",
+                FlatStyle = FlatStyle.Flat,
+                BackColor = AccentColor,
+                ForeColor = Color.White,
+                Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
             _btnPick.FlatAppearance.BorderSize = 0;
-            _btnPick.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
-            _btnPick.Cursor = Cursors.Hand;
             _btnPick.Click += BtnPick_Click;
 
-            // ---- Copy Button (secondary) ----
-            _btnCopy = new Button();
-            _btnCopy.Text = "复制";
-            _btnCopy.Location = new Point(224, 16);
-            _btnCopy.Size = new Size(80, 34);
-            _btnCopy.FlatStyle = FlatStyle.Flat;
-            _btnCopy.BackColor = Color.White;
-            _btnCopy.ForeColor = Color.FromArgb(51, 51, 51);
-            _btnCopy.FlatAppearance.BorderColor = Color.FromArgb(204, 204, 204);
-            _btnCopy.Cursor = Cursors.Hand;
+            _btnCopy = new Button
+            {
+                Location = new Point(142, 69),
+                Size = new Size(112, 36),
+                Text = "复制 HEX",
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(248, 249, 251),
+                ForeColor = Color.FromArgb(40, 40, 40),
+                Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            _btnCopy.FlatAppearance.BorderColor = SoftBorderColor;
+            _btnCopy.FlatAppearance.BorderSize = 1;
             _btnCopy.Click += BtnCopy_Click;
 
-            // ---- HEX Label + TextBox ----
-            Label lblHex = new Label();
-            lblHex.Text = "HEX";
-            lblHex.Location = new Point(132, 58);
-            lblHex.Size = new Size(36, 24);
-            lblHex.TextAlign = ContentAlignment.MiddleLeft;
-            lblHex.ForeColor = SubtleTextColor;
-            lblHex.Font = new Font("Segoe UI", 8.25F, FontStyle.Bold);
-
-            _txtHex = new TextBox();
-            _txtHex.Location = new Point(170, 56);
-            _txtHex.Size = new Size(194, 24);
-            _txtHex.Font = new Font("Consolas", 11F);
-            _txtHex.ReadOnly = true;
-            _txtHex.BackColor = Color.White;
-            _txtHex.Cursor = Cursors.IBeam;
+            Label lblHex = CreateFieldLabel("HEX", new Point(18, 119));
+            _txtHex = CreateValueTextBox(new Point(18, 140), 236, new Font("Consolas", 12F, FontStyle.Bold));
             _txtHex.Click += TxtHex_Click;
+            _txtHex.DoubleClick += delegate { CopyToClipboard(); };
 
-            // ---- Checkboxes ----
-            _chkAlwaysOnTop = new CheckBox();
-            _chkAlwaysOnTop.Text = "总在最前";
-            _chkAlwaysOnTop.Location = new Point(132, 92);
-            _chkAlwaysOnTop.Size = new Size(100, 24);
+            _chkAlwaysOnTop = new CheckBox
+            {
+                Location = new Point(18, 176),
+                Size = new Size(100, 22),
+                Text = "总在最前",
+                AutoSize = false
+            };
             _chkAlwaysOnTop.CheckedChanged += ChkAlwaysOnTop_CheckedChanged;
 
-            _chkAutoCopy = new CheckBox();
-            _chkAutoCopy.Text = "自动复制";
-            _chkAutoCopy.Location = new Point(240, 92);
-            _chkAutoCopy.Size = new Size(100, 24);
+            _chkAutoCopy = new CheckBox
+            {
+                Location = new Point(132, 176),
+                Size = new Size(100, 22),
+                Text = "自动复制",
+                AutoSize = false
+            };
             _chkAutoCopy.CheckedChanged += ChkAutoCopy_CheckedChanged;
 
-            // ---- RGB GroupBox ----
-            _grpRgb = new GroupBox();
-            _grpRgb.Text = "RGB";
-            _grpRgb.Location = new Point(16, 128);
-            _grpRgb.Size = new Size(348, 56);
-            _grpRgb.ForeColor = SubtleTextColor;
-
-            Font rgbLabelFont = new Font("Segoe UI", 9F, FontStyle.Bold);
-            Font rgbValueFont = new Font("Consolas", 10F);
-
-            Label lblR = new Label();
-            lblR.Text = "R";
-            lblR.Location = new Point(40, 22);
-            lblR.Size = new Size(20, 22);
-            lblR.Font = rgbLabelFont;
-            lblR.TextAlign = ContentAlignment.MiddleCenter;
-            lblR.ForeColor = Color.FromArgb(200, 40, 40);
-
-            _txtR = new TextBox();
-            _txtR.Location = new Point(62, 20);
-            _txtR.Size = new Size(56, 24);
-            _txtR.ReadOnly = true;
-            _txtR.BackColor = Color.White;
-            _txtR.TextAlign = HorizontalAlignment.Center;
-            _txtR.Font = rgbValueFont;
-
-            Label lblG = new Label();
-            lblG.Text = "G";
-            lblG.Location = new Point(136, 22);
-            lblG.Size = new Size(20, 22);
-            lblG.Font = rgbLabelFont;
-            lblG.TextAlign = ContentAlignment.MiddleCenter;
-            lblG.ForeColor = Color.FromArgb(40, 160, 40);
-
-            _txtG = new TextBox();
-            _txtG.Location = new Point(158, 20);
-            _txtG.Size = new Size(56, 24);
-            _txtG.ReadOnly = true;
-            _txtG.BackColor = Color.White;
-            _txtG.TextAlign = HorizontalAlignment.Center;
-            _txtG.Font = rgbValueFont;
-
-            Label lblB = new Label();
-            lblB.Text = "B";
-            lblB.Location = new Point(232, 22);
-            lblB.Size = new Size(20, 22);
-            lblB.Font = rgbLabelFont;
-            lblB.TextAlign = ContentAlignment.MiddleCenter;
-            lblB.ForeColor = Color.FromArgb(40, 80, 200);
-
-            _txtB = new TextBox();
-            _txtB.Location = new Point(254, 20);
-            _txtB.Size = new Size(56, 24);
-            _txtB.ReadOnly = true;
-            _txtB.BackColor = Color.White;
-            _txtB.TextAlign = HorizontalAlignment.Center;
-            _txtB.Font = rgbValueFont;
-
-            _grpRgb.Controls.AddRange(new Control[] { lblR, _txtR, lblG, _txtG, lblB, _txtB });
-
-            // ---- Status Label ----
-            _lblStatus = new Label();
-            _lblStatus.Text = "就绪";
-            _lblStatus.Location = new Point(16, 198);
-            _lblStatus.Size = new Size(348, 26);
-            _lblStatus.TextAlign = ContentAlignment.MiddleLeft;
-            _lblStatus.ForeColor = SubtleTextColor;
-            _lblStatus.BackColor = StatusBarColor;
-            _lblStatus.Padding = new Padding(8, 0, 0, 0);
-
-            this.Controls.AddRange(new Control[] {
-                _colorPreview, _btnPick, _btnCopy,
-                lblHex, _txtHex,
-                _chkAlwaysOnTop, _chkAutoCopy,
-                _grpRgb, _lblStatus
+            rightCard.Controls.AddRange(new Control[]
+            {
+                lblTitle, _lblHotKeyHint, _btnPick, _btnCopy,
+                lblHex, _txtHex, _chkAlwaysOnTop, _chkAutoCopy
             });
-            this.FormClosing += MainForm_FormClosing;
-            this.Resize += MainForm_Resize;
+
+            _rgbCard = CreateCardPanel(new Rectangle(16, 240, 438, 72));
+            Label lblRgbTitle = new Label
+            {
+                Location = new Point(16, 10),
+                Size = new Size(120, 20),
+                Text = "RGB 数值",
+                Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+                ForeColor = SoftTextColor
+            };
+
+            _txtR = CreateRgbBox(_rgbCard, "R", Color.FromArgb(212, 61, 61), new Point(16, 34));
+            _txtG = CreateRgbBox(_rgbCard, "G", Color.FromArgb(43, 160, 92), new Point(156, 34));
+            _txtB = CreateRgbBox(_rgbCard, "B", Color.FromArgb(53, 112, 214), new Point(296, 34));
+
+            _rgbCard.Controls.Add(lblRgbTitle);
+
+            Panel statusPanel = new Panel
+            {
+                Location = new Point(16, 321),
+                Size = new Size(438, 36),
+                BackColor = StatusBarColor
+            };
+            _lblStatus = new Label
+            {
+                Dock = DockStyle.Fill,
+                ForeColor = SoftTextColor,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(12, 0, 12, 0)
+            };
+            statusPanel.Controls.Add(_lblStatus);
+
+            root.Controls.AddRange(new Control[]
+            {
+                _previewCard, rightCard, _rgbCard, statusPanel
+            });
+
+            Controls.Add(root);
+            FormClosing += MainForm_FormClosing;
+            Resize += MainForm_Resize;
+
+            ResumeLayout(false);
+        }
+
+        private Panel CreateCardPanel(Rectangle bounds)
+        {
+            Panel panel = new Panel
+            {
+                Location = bounds.Location,
+                Size = bounds.Size,
+                BackColor = CardColor,
+                BorderStyle = BorderStyle.FixedSingle
+            };
+            return panel;
+        }
+
+        private static Label CreateFieldLabel(string text, Point location)
+        {
+            return new Label
+            {
+                Location = location,
+                Size = new Size(120, 18),
+                Text = text,
+                ForeColor = SoftTextColor,
+                Font = new Font("Segoe UI", 8.5F, FontStyle.Bold)
+            };
+        }
+
+        private static TextBox CreateValueTextBox(Point location, int width, Font font)
+        {
+            return new TextBox
+            {
+                Location = location,
+                Size = new Size(width, 30),
+                BorderStyle = BorderStyle.FixedSingle,
+                Font = font,
+                ReadOnly = true,
+                BackColor = Color.White,
+                TabStop = false
+            };
+        }
+
+        private static TextBox CreateRgbBox(Panel parent, string title, Color titleColor, Point location)
+        {
+            Panel group = new Panel
+            {
+                Location = location,
+                Size = new Size(126, 24),
+                BackColor = Color.Transparent
+            };
+
+            Label lbl = new Label
+            {
+                Location = new Point(0, 2),
+                Size = new Size(20, 20),
+                Text = title,
+                ForeColor = titleColor,
+                Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+                TextAlign = ContentAlignment.MiddleCenter
+            };
+
+            TextBox box = new TextBox
+            {
+                Location = new Point(28, 0),
+                Size = new Size(86, 24),
+                ReadOnly = true,
+                BackColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle,
+                Font = new Font("Consolas", 10.5F),
+                TextAlign = HorizontalAlignment.Center,
+                TabStop = false
+            };
+
+            group.Controls.Add(lbl);
+            group.Controls.Add(box);
+            parent.Controls.Add(group);
+            return box;
         }
 
         private void ApplySettings()
         {
             _chkAlwaysOnTop.Checked = SettingsManager.AlwaysOnTop;
             _chkAutoCopy.Checked = SettingsManager.AutoCopyToClipboard;
-            this.TopMost = SettingsManager.AlwaysOnTop;
+            TopMost = SettingsManager.AlwaysOnTop;
+        }
+
+        private void RestoreWindowPosition()
+        {
+            if (SettingsManager.WindowX == int.MinValue || SettingsManager.WindowY == int.MinValue)
+            {
+                return;
+            }
+
+            Rectangle target = new Rectangle(SettingsManager.WindowX, SettingsManager.WindowY, Width, Height);
+            foreach (Screen screen in Screen.AllScreens)
+            {
+                if (screen.WorkingArea.IntersectsWith(target))
+                {
+                    StartPosition = FormStartPosition.Manual;
+                    Location = new Point(SettingsManager.WindowX, SettingsManager.WindowY);
+                    return;
+                }
+            }
         }
 
         private void UpdateDisplay()
         {
-            _colorPreview.BackColor = _currentColor;
-            _colorPreview.Invalidate();
-            _txtHex.Text = ColorHelpers.FormatHtml(_currentColor, true, false);
+            string hex = ColorHelpers.FormatHtml(_currentColor, true, false);
+            Color textColor = ColorHelpers.GetReadableTextColor(_currentColor);
+
+            _previewSwatch.BackColor = _currentColor;
+            _previewSwatch.Invalidate();
+
+            _lblPreviewHex.Text = hex;
+            _lblPreviewHex.ForeColor = textColor;
+
+            _txtHex.Text = hex;
             _txtR.Text = _currentColor.R.ToString();
             _txtG.Text = _currentColor.G.ToString();
             _txtB.Text = _currentColor.B.ToString();
@@ -496,66 +685,128 @@ namespace ColorCop
 
         private void BtnPick_Click(object sender, EventArgs e)
         {
-            if (_eyeDropping) StopEyeDropper();
-            else StartEyeDropper();
+            if (_eyeDropping)
+            {
+                CancelEyeDropper("已取消取色。");
+            }
+            else
+            {
+                StartEyeDropper();
+            }
         }
 
         private void StartEyeDropper()
         {
             _eyeDropping = true;
-            _btnPick.Text = "停止";
-            _lblStatus.Text = "取色中... 点击左键确认";
-            this.WindowState = FormWindowState.Minimized;
-            this.Hide();
+            _awaitingMouseRelease = true;
+            _btnPick.Text = "取消取色";
+            SetStatus("取色中，左键确认，Esc 或右键取消。");
+            WindowState = FormWindowState.Minimized;
+            Hide();
             _eyeDropperTimer.Start();
         }
 
-        private void StopEyeDropper()
+        private void StopEyeDropper(bool keepSample, string statusText)
         {
             _eyeDropping = false;
-            _btnPick.Text = "取色";
-            _lblStatus.Text = string.Format("RGB({0}, {1}, {2})  #{3:X2}{4:X2}{5:X2}",
-                _currentColor.R, _currentColor.G, _currentColor.B,
-                _currentColor.R, _currentColor.G, _currentColor.B);
+            _awaitingMouseRelease = false;
+            _btnPick.Text = "开始取色";
             _eyeDropperTimer.Stop();
-            this.Show();
-            this.WindowState = FormWindowState.Normal;
-            this.BringToFront();
-            this.Activate();
+            ShowWindow();
+            SetStatus(statusText);
+
+            if (keepSample && _chkAutoCopy.Checked)
+            {
+                CopyToClipboard();
+            }
+        }
+
+        private void CancelEyeDropper(string statusText)
+        {
+            StopEyeDropper(false, statusText);
+        }
+
+        private void ConfirmEyeDropper()
+        {
+            string statusText = string.Format(
+                "已选取 {0}  RGB({1}, {2}, {3})",
+                ColorHelpers.FormatHtml(_currentColor, true, false),
+                _currentColor.R,
+                _currentColor.G,
+                _currentColor.B);
+
+            StopEyeDropper(true, statusText);
         }
 
         private void EyeDropperTimer_Tick(object sender, EventArgs e)
         {
             NativeMethods.POINT pt;
-            NativeMethods.GetCursorPos(out pt);
+            if (NativeMethods.GetCursorPos(out pt) == 0)
+            {
+                return;
+            }
+
             _currentColor = ScreenSampler.GetPixel(pt.X, pt.Y);
             UpdateDisplay();
-            _lblStatus.Text = string.Format("取色中... ({0}, {1})  RGB({2},{3},{4})",
-                pt.X, pt.Y, _currentColor.R, _currentColor.G, _currentColor.B);
+            SetStatus(string.Format("取色中... 坐标 ({0}, {1})  RGB({2}, {3}, {4})", pt.X, pt.Y, _currentColor.R, _currentColor.G, _currentColor.B));
 
-            if ((NativeMethods.GetAsyncKeyState(0x01) & 0x8000) != 0)
+            bool leftDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_LBUTTON) & 0x8000) != 0;
+            bool rightDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_RBUTTON) & 0x8000) != 0;
+            bool escDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_ESCAPE) & 0x8000) != 0;
+
+            if (_awaitingMouseRelease)
             {
-                StopEyeDropper();
-                if (_chkAutoCopy.Checked) CopyToClipboard();
+                if (!leftDown)
+                {
+                    _awaitingMouseRelease = false;
+                }
+                return;
+            }
+
+            if (escDown || rightDown)
+            {
+                CancelEyeDropper("已取消取色。");
+                return;
+            }
+
+            if (leftDown)
+            {
+                ConfirmEyeDropper();
             }
         }
 
-        private void BtnCopy_Click(object sender, EventArgs e) { CopyToClipboard(); }
+        private void BtnCopy_Click(object sender, EventArgs e)
+        {
+            CopyToClipboard();
+        }
 
         private void CopyToClipboard()
         {
-            if (!string.IsNullOrEmpty(_txtHex.Text))
+            if (string.IsNullOrWhiteSpace(_txtHex.Text))
+            {
+                return;
+            }
+
+            try
             {
                 Clipboard.SetText(_txtHex.Text);
-                _lblStatus.Text = "已复制: " + _txtHex.Text;
+                SetStatus("已复制到剪贴板: " + _txtHex.Text);
+            }
+            catch (Exception ex)
+            {
+                SetStatus("复制失败，请稍后再试。");
+                System.Diagnostics.Debug.WriteLine("Clipboard error: " + ex.Message);
             }
         }
 
-        private void TxtHex_Click(object sender, EventArgs e) { _txtHex.SelectAll(); }
+        private void TxtHex_Click(object sender, EventArgs e)
+        {
+            _txtHex.SelectAll();
+        }
 
         private void ChkAlwaysOnTop_CheckedChanged(object sender, EventArgs e)
         {
-            this.TopMost = _chkAlwaysOnTop.Checked;
+            TopMost = _chkAlwaysOnTop.Checked;
             SettingsManager.AlwaysOnTop = _chkAlwaysOnTop.Checked;
         }
 
@@ -564,83 +815,158 @@ namespace ColorCop
             SettingsManager.AutoCopyToClipboard = _chkAutoCopy.Checked;
         }
 
-        private void ColorPreview_Paint(object sender, PaintEventArgs e)
+        private void PreviewSwatch_Paint(object sender, PaintEventArgs e)
         {
-            using (Brush b = new SolidBrush(_currentColor))
-                e.Graphics.FillRectangle(b, 0, 0, _colorPreview.Width, _colorPreview.Height);
+            using (SolidBrush brush = new SolidBrush(_currentColor))
+            {
+                e.Graphics.FillRectangle(brush, 0, 0, _previewSwatch.Width, _previewSwatch.Height);
+            }
+
+            Rectangle border = new Rectangle(0, 0, _previewSwatch.Width - 1, _previewSwatch.Height - 1);
+            using (Pen pen = new Pen(Color.FromArgb(255, 255, 255, 255)))
+            {
+                e.Graphics.DrawRectangle(pen, border);
+            }
+
+            string shortRgb = string.Format("{0}, {1}, {2}", _currentColor.R, _currentColor.G, _currentColor.B);
+            using (SolidBrush textBrush = new SolidBrush(ColorHelpers.GetReadableTextColor(_currentColor)))
+            using (Font overlayFont = new Font("Segoe UI", 9F, FontStyle.Bold))
+            using (StringFormat format = new StringFormat())
+            {
+                format.Alignment = StringAlignment.Center;
+                format.LineAlignment = StringAlignment.Center;
+                e.Graphics.DrawString(shortRgb, overlayFont, textBrush, border, format);
+            }
         }
 
         private void RegisterHotKey()
         {
-            NativeMethods.RegisterHotKey(this.Handle, HOTKEY_ID, NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT, (int)Keys.C);
+            if (_hotKeyRegistered || !IsHandleCreated)
+            {
+                return;
+            }
+
+            _hotKeyRegistered = NativeMethods.RegisterHotKey(
+                Handle,
+                HotKeyId,
+                NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT,
+                (int)Keys.C);
+
+            if (!_hotKeyRegistered && _lblHotKeyHint != null)
+            {
+                _lblHotKeyHint.Text = "快捷键注册失败，请检查是否被占用";
+                _lblHotKeyHint.ForeColor = Color.FromArgb(180, 70, 70);
+            }
         }
 
         private void UnregisterHotKey()
         {
-            NativeMethods.UnregisterHotKey(this.Handle, HOTKEY_ID);
+            if (!_hotKeyRegistered || !IsHandleCreated)
+            {
+                return;
+            }
+
+            NativeMethods.UnregisterHotKey(Handle, HotKeyId);
+            _hotKeyRegistered = false;
         }
 
         protected override void WndProc(ref Message m)
         {
             if (m.Msg == NativeMethods.WM_HOTKEY)
             {
-                if (this.Visible) this.Hide();
-                else this.ShowWindow();
+                if (Visible && WindowState != FormWindowState.Minimized)
+                {
+                    HideToTray();
+                }
+                else
+                {
+                    ShowWindow();
+                }
                 return;
             }
+
             if (m.Msg == NativeMethods.WM_SHOW_COLORCOP)
             {
-                this.ShowWindow();
+                ShowWindow();
                 return;
             }
+
             base.WndProc(ref m);
         }
 
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
         {
-            UnregisterHotKey();
             if (_eyeDropperTimer != null)
             {
                 _eyeDropperTimer.Stop();
                 _eyeDropperTimer.Dispose();
-                _eyeDropperTimer = null;
             }
+
+            if (WindowState == FormWindowState.Normal)
+            {
+                SettingsManager.WindowX = Location.X;
+                SettingsManager.WindowY = Location.Y;
+            }
+
             SettingsManager.AlwaysOnTop = _chkAlwaysOnTop.Checked;
             SettingsManager.AutoCopyToClipboard = _chkAutoCopy.Checked;
-            SettingsManager.WindowX = this.Location.X;
-            SettingsManager.WindowY = this.Location.Y;
             SettingsManager.Save();
-            if (_trayManager != null) _trayManager.Dispose();
+
+            if (_trayManager != null)
+            {
+                _trayManager.Dispose();
+                _trayManager = null;
+            }
         }
 
         private void MainForm_Resize(object sender, EventArgs e)
         {
-            if (this.WindowState == FormWindowState.Minimized)
+            if (WindowState == FormWindowState.Minimized && !_eyeDropping)
             {
-                if (_trayManager != null) _trayManager.Show();
-                this.Hide();
+                HideToTray();
             }
+        }
+
+        private void HideToTray()
+        {
+            if (_trayManager != null)
+            {
+                _trayManager.Show();
+            }
+
+            Hide();
         }
 
         public void ShowWindow()
         {
-            this.Show();
-            this.WindowState = FormWindowState.Normal;
-            this.BringToFront();
-            this.Activate();
-            if (_trayManager != null) _trayManager.Hide();
+            Show();
+            WindowState = FormWindowState.Normal;
+            BringToFront();
+            Activate();
+
+            if (_trayManager != null)
+            {
+                _trayManager.Hide();
+            }
         }
 
         public void ExitApplication()
         {
-            Application.Exit();
+            Close();
+        }
+
+        private void SetStatus(string text)
+        {
+            if (_lblStatus != null)
+            {
+                _lblStatus.Text = text;
+            }
         }
     }
 
-    // ========== Program ==========
     internal static class Program
     {
-        private static System.Threading.Mutex _mutex = null;
+        private static System.Threading.Mutex _mutex;
         private const string MutexName = "ColorCopSingleInstance";
 
         [STAThread]
@@ -648,14 +974,22 @@ namespace ColorCop
         {
             bool createdNew;
             _mutex = new System.Threading.Mutex(true, MutexName, out createdNew);
+
             if (!createdNew)
             {
-                NativeMethods.PostMessage((IntPtr)NativeMethods.HWND_BROADCAST,
-                    NativeMethods.WM_SHOW_COLORCOP, IntPtr.Zero, IntPtr.Zero);
+                NativeMethods.PostMessage(
+                    (IntPtr)NativeMethods.HWND_BROADCAST,
+                    NativeMethods.WM_SHOW_COLORCOP,
+                    IntPtr.Zero,
+                    IntPtr.Zero);
                 return;
             }
+
+            SettingsManager.Initialize();
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+
             try
             {
                 Application.Run(new MainForm());
@@ -666,6 +1000,7 @@ namespace ColorCop
                 {
                     _mutex.ReleaseMutex();
                     _mutex.Close();
+                    _mutex = null;
                 }
             }
         }
